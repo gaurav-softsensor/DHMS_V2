@@ -32,30 +32,57 @@ Published artifact: https://claude.ai/code/artifact/dafda606-213c-4420-af4e-ed4a
 | `assets/boundaries/` | Vendored state / district / official-outline GeoJSON |
 | `dist/artifact.html` | Same page minus the `<html>` wrapper, for the Artifact tool |
 
-## Deploying
+## Deploying — GitHub Pages
 
-`index.html` at the root is a complete, self-contained document — the CSS, the JS
-and all map geometry are inlined. There is no server, bundler or build step to
-run before serving it.
+`index.html` at the root is a complete, self-contained document: the CSS, the JS
+and all map geometry are inlined. Nothing is compiled at deploy time, so Pages
+just serves the committed file.
+
+### One-time setup
 
 ```bash
-# view it
-xdg-open index.html
-
-# or serve the folder
-python3 -m http.server 8000     # -> http://localhost:8000
+# 1. create the repo (or use the web UI / gh repo create)
+git remote add origin https://github.com/Softsensor-org/nhai-network-explorer.git
+git push -u origin main
 ```
 
-Any static host works: point it at this folder and it serves `index.html` at the
-web root. `.nojekyll` stops GitHub Pages post-processing; `netlify.toml` declares
-`publish = "."` with no build command.
+Then in **Settings → Pages → Build and deployment**, set **Source** to
+**GitHub Actions**. That is the only setting required — do *not* pick
+"Deploy from a branch", which would bypass the workflow.
+
+The site goes live at:
+
+```
+https://softsensor-org.github.io/nhai-network-explorer/
+```
+
+Every later `git push` to `main` redeploys automatically; **Actions → Deploy to
+GitHub Pages → Run workflow** triggers it by hand.
+
+### How the workflow works
+
+`.github/workflows/pages.yml` copies `index.html` and `.nojekyll` into `_site/`
+and uploads that — no Node, no Python, no build step, because the page is already
+built. `.nojekyll` stops Jekyll from post-processing the output.
+
+It needs `pages: write` and `id-token: write`, which are declared in the
+workflow; no personal access token or repository secret is involved.
+
+### Serving it anywhere else
+
+```bash
+xdg-open index.html            # just open the file
+python3 -m http.server 8000    # or serve the folder -> http://localhost:8000
+```
+
+Any static host works — point it at this folder. `netlify.toml` is included for
+Netlify (`publish = "."`, no build command).
 
 Only `index.html` is needed at runtime. `src/`, `build/`, `data/` and `assets/`
-are build-time inputs — commit them for reproducibility, but a host can ignore
-them.
+are build-time inputs: committed for reproducibility, never fetched by a browser.
 
-`dist/artifact.html` is the same page without the `<html>`/`<head>`/`<body>`
-wrapper, since the Artifact tool supplies its own.
+`dist/artifact.html` (git-ignored) is the same page without the
+`<html>`/`<head>`/`<body>` wrapper, for the Artifact tool, which supplies its own.
 
 ## Rebuilding
 
@@ -230,5 +257,24 @@ inside its own territory's width; a few long names have short forms
 with a collision check so two labels never overlap. This is why
 "Dadra and Nagar Haveli and Daman and Diu" no longer sprawls across Maharashtra —
 the hover tooltip still gives the full name.
+
+**Row hover** marks the territory with a ring and a label chip rather than
+zooming to fit it. Fitting was tried and rejected: RO-Gandhinagar's slice of
+Rajasthan is ~0.04% of the state, so a fit filled the screen with flat colour and
+lost all context. The camera pans (never zooms) only when the target is outside
+the viewport, and restores on mouse-out.
+
+**Small states get leader lines.** Labels are placed in two passes — inline where
+the name fits inside the shape, otherwise a callout outside it joined by a line
+to the nearest point on its outline (not its centroid, which made the
+Lakshadweep leader cross back over Kerala). Goa, Mizoram, Tripura, Nagaland,
+Sikkim, Delhi, Chandigarh, DNH & DD, Lakshadweep and A&N all label this way; a
+few long names have short forms. Callouts try 8 directions at increasing distance
+and take the first slot that collides with nothing already drawn.
+
+**One `anim()` gotcha worth keeping.** `requestAnimationFrame` timestamps are
+document-relative, so seeding the tween's `t0` from `performance.now()` made the
+progress ratio negative and drove `scale` to -252 (the map rendered as one flat
+fill). `t0` is now taken from the first rAF callback.
 
 **Keyboard:** `/` focuses search · `Esc` goes up one level.

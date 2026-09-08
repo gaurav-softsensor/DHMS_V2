@@ -98,6 +98,7 @@ function hit(g,x,y){ if(!g)return false;
 /* ---------- state ---------- */
 let view={level:'india',state:null,ro:null,piu:null,project:null};
 let hover=null, feats=[], zoomTarget=null;
+let previewHome=null, previewTimer=null;   // row-hover camera preview
 
 function currentFeatures(){
   if(view.level==='india') return D.states.filter(s=>s.geom).map(s=>({kind:'state',name:s.name,geom:s.geom,d:s}));
@@ -143,12 +144,22 @@ function flyTo(g,ms=520){
   anim(ns, w/2-cx, h/2-cy, ms);
 }
 function anim(ns,nx,ny,ms){
-  const s0=scale,x0=tx,y0=ty,t0=performance.now();
+  if(!(ns>0)) return;                      // never tween to a bad scale
+  anim.target={scale:ns,tx:nx,ty:ny};      // where this tween ends
+  const s0=scale,x0=tx,y0=ty;
   if(matchMedia('(prefers-reduced-motion:reduce)').matches){scale=ns;tx=nx;ty=ny;draw();return;}
   cancelAnimationFrame(anim._r);
-  (function step(t){const k=Math.min((t-t0)/ms,1),e=1-Math.pow(1-k,3);
+  // Take t0 from the first rAF callback, not performance.now(): rAF timestamps
+  // are document-relative, so mixing the two clocks makes k negative and the
+  // eased value explode.
+  let t0=null;
+  anim._r=requestAnimationFrame(function step(t){
+    if(t0===null) t0=t;
+    const k=ms>0?Math.min(Math.max((t-t0)/ms,0),1):1;
+    const e=1-Math.pow(1-k,3);
     scale=s0+(ns-s0)*e; tx=x0+(nx-x0)*e; ty=y0+(ny-y0)*e; draw();
-    if(k<1) anim._r=requestAnimationFrame(step);})(t0);
+    if(k<1) anim._r=requestAnimationFrame(step);
+  });
 }
 
 /* ---------- draw ---------- */
@@ -204,35 +215,116 @@ function draw(){
     });
   }
 
+  // hover marker: ring + label chip, so a sliver is findable without zooming
+  if(hover){
+    const hf=feats.find(x=>x.kind===hover.kind&&x.name===hover.name);
+    if(hf){
+      const [ha,hb,hc,hd]=bbox(hf.geom);
+      const mx=px((ha+hc)/2), my=py((hb+hd)/2);
+      const rad=Math.max((hc-ha)*fitS*scale,(MLAT(hd)-MLAT(hb))*fitS*scale)/2;
+      const R=Math.min(Math.max(rad+10,16),46), hu=hueOf(hf.kind,hf.name);
+      ctx.save();
+      ctx.strokeStyle=solid(hu);
+      ctx.globalAlpha=.30; ctx.lineWidth=7;
+      ctx.beginPath(); ctx.arc(mx,my,R,0,7); ctx.stroke();
+      ctx.globalAlpha=1; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(mx,my,R,0,7); ctx.stroke();
+      ctx.restore();
+      const nm=hf.kind==='ro'?roLabel(hf.name):hf.kind==='piu'?piuLabel(hf.name):hf.name;
+      ctx.font='700 11.5px "Public Sans",system-ui,sans-serif';
+      const tw=ctx.measureText(nm).width, bw2=tw+12, bh2=18, rr=4;
+      let bx=mx+R+8; if(bx+bw2>w-6) bx=mx-R-8-bw2;
+      const by=Math.max(4,Math.min(my-bh2/2,h-bh2-4));
+      ctx.fillStyle=dark()?'rgba(27,31,38,.96)':'rgba(255,255,255,.97)';
+      ctx.strokeStyle=solid(hu); ctx.lineWidth=1;
+      ctx.beginPath();
+      ctx.moveTo(bx+rr,by); ctx.lineTo(bx+bw2-rr,by);
+      ctx.quadraticCurveTo(bx+bw2,by,bx+bw2,by+rr); ctx.lineTo(bx+bw2,by+bh2-rr);
+      ctx.quadraticCurveTo(bx+bw2,by+bh2,bx+bw2-rr,by+bh2); ctx.lineTo(bx+rr,by+bh2);
+      ctx.quadraticCurveTo(bx,by+bh2,bx,by+bh2-rr); ctx.lineTo(bx,by+rr);
+      ctx.quadraticCurveTo(bx,by,bx+rr,by); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.textAlign='left'; ctx.textBaseline='middle';
+      ctx.fillStyle=ink; ctx.fillText(nm,bx+6,by+bh2/2);
+      ctx.textAlign='center';
+    }
+  }
+
   // labels
   if(feats.length<=60){
     ctx.font='600 11px "Public Sans",system-ui,sans-serif';
-    ctx.textAlign='center'; ctx.textBaseline='middle';
-    // collect first, then drop labels that overflow their shape or collide
-    const placed=[];
+    ctx.textBaseline='middle';
+    const SHORT={'Dadra and Nagar Haveli and Daman and Diu':'DNH & DD',
+      'Andaman and Nicobar':'A & N Islands','Jammu and Kashmir':'J & K',
+      'Arunachal Pradesh':'Arunachal','Himachal Pradesh':'Himachal'};
+
+    // Pass 1: measure every feature and decide inline vs. leader-line callout.
+    // Small territories (Goa, Mizoram, Delhi, the UTs) can never fit their name,
+    // so they get a label outside the shape joined by a line to their centroid.
+    const inline=[], callout=[];
     feats.forEach(f=>{
-      const c=centroid(f.geom); if(!c)return;
-      const x=px(c[0]),y=py(c[1]);
-      if(x<0||y<0||x>w||y>h)return;
+      const c=centroid(f.geom); if(!c) return;
+      const x=px(c[0]), y=py(c[1]);
+      if(x<-40||y<-40||x>w+40||y>h+40) return;
       const [a,b,cc,dd]=bbox(f.geom);
-      const bw=(cc-a)*fitS*scale;
-      if(bw<34)return;
-      let t=f.kind==='ro'?roLabel(f.name):f.kind==='piu'?piuLabel(f.name):f.name;
-      let tw=ctx.measureText(t).width;
-      // a label must fit inside its own territory, else abbreviate, else drop
-      if(tw>bw-6){
-        const shortMap={'Dadra and Nagar Haveli and Daman and Diu':'DNH & DD',
-          'Andaman and Nicobar':'A & N Islands','Jammu and Kashmir':'J & K',
-          'Arunachal Pradesh':'Arunachal','Himachal Pradesh':'Himachal'};
-        const alt=shortMap[f.name];
-        if(alt){ t=alt; tw=ctx.measureText(t).width; }
-      }
-      if(tw>bw-4) return;                      // still doesn't fit: no label
-      const box={x1:x-tw/2-2,y1:y-7,x2:x+tw/2+2,y2:y+7};
-      if(placed.some(q=>!(box.x2<q.x1||box.x1>q.x2||box.y2<q.y1||box.y1>q.y2))) return;
-      placed.push(box);
+      const bw=(cc-a)*fitS*scale, bh=(MLAT(dd)-MLAT(b))*fitS*scale;
+      const full=f.kind==='ro'?roLabel(f.name):f.kind==='piu'?piuLabel(f.name):f.name;
+      const t=(bw<ctx.measureText(full).width+6 && SHORT[f.name])?SHORT[f.name]:full;
+      const tw=ctx.measureText(t).width;
+      if(tw<=bw-6 && bh>=13) inline.push({f,x,y,t,tw});
+      else callout.push({f,x,y,t,tw,r:Math.max(bw,bh)/2});
+    });
+
+    const placed=[];
+    const clash=q=>placed.some(p=>!(q.x2<p.x1||q.x1>p.x2||q.y2<p.y1||q.y1>p.y2));
+    const paint=(t,x,y)=>{
       ctx.lineWidth=3.2; ctx.strokeStyle=dark()?'rgba(20,23,28,.85)':'rgba(255,255,255,.9)';
       ctx.strokeText(t,x,y); ctx.fillStyle=ink; ctx.fillText(t,x,y);
+    };
+
+    // Pass 2: inline labels first — they own the space they sit in.
+    ctx.textAlign='center';
+    inline.forEach(o=>{
+      const box={x1:o.x-o.tw/2-2,y1:o.y-7,x2:o.x+o.tw/2+2,y2:o.y+7};
+      if(clash(box)) return;
+      placed.push(box); paint(o.t,o.x,o.y);
+    });
+
+    // Pass 3: callouts. Try 8 directions at growing distance, take the first
+    // slot that is on-canvas and collides with nothing already drawn.
+    const DIRS=[[1,-1],[1,0],[1,1],[-1,-1],[-1,0],[-1,1],[0,-1],[0,1]];
+    const lineCol=dark()?'rgba(236,238,241,.55)':'rgba(27,31,38,.45)';
+    callout.forEach(o=>{
+      let best=null;
+      for(const step of [10,16,24,34,48,64]){
+        for(const [dx,dy] of DIRS){
+          const lead=o.r+step;
+          const lx=o.x+dx*lead, ly=o.y+dy*lead;
+          const right=dx>=0;
+          const tx0=lx+(right?5:-5);
+          const x1=right?tx0:tx0-o.tw, x2=right?tx0+o.tw:tx0;
+          if(x1<3||x2>w-3||ly<9||ly>h-9) continue;
+          const box={x1:x1-2,y1:ly-7,x2:x2+2,y2:ly+7};
+          if(clash(box)) continue;
+          best={lx,ly,tx0,right,box}; break;
+        }
+        if(best) break;
+      }
+      if(!best) return;
+      placed.push(best.box);
+      // anchor on the outline point nearest the label so the line never
+      // crosses back over the shape (Lakshadweep -> Kerala was the giveaway)
+      let ax=o.x, ay=o.y, ad=1e18;
+      eachRing(o.f.geom,ring=>{ for(let k=0;k<ring.length;k+=2){
+        const rx=px(ring[k][0]), ry=py(ring[k][1]);
+        const dd2=(rx-best.lx)*(rx-best.lx)+(ry-best.ly)*(ry-best.ly);
+        if(dd2<ad){ad=dd2;ax=rx;ay=ry;} } });
+      ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(best.lx,best.ly);
+      ctx.strokeStyle=lineCol; ctx.lineWidth=1; ctx.stroke();
+      ctx.beginPath(); ctx.arc(ax,ay,1.9,0,7); ctx.fillStyle=lineCol; ctx.fill();
+      ctx.textAlign=best.right?'left':'right';
+      paint(o.t,best.tx0,best.ly);
+      ctx.textAlign='center';
     });
   }
 }
@@ -354,7 +446,10 @@ function unionBox(fs){ let a=1e9,b=1e9,c=-1e9,d=-1e9;
 /* ---------- navigation ---------- */
 function go(v){
   view={level:v.level,state:v.state||null,ro:v.ro||null,piu:v.piu||null,project:v.project||null};
-  hover=null; hideTip(); render();
+  hover=null; hideTip();
+  if(previewTimer){clearTimeout(previewTimer);previewTimer=null;}
+  previewHome=null;
+  render();
   const f=currentFeatures();
   if(view.level==='india') anim(1,0,0,480);
   else if(view.level==='project'){ const p=D.projects.find(x=>x.upc===view.project);
@@ -514,10 +609,39 @@ function rowHTML(kind,name,label,sub){
 }
 function bindRows(root,fn){ root.querySelectorAll('.row[data-n]').forEach(el=>{
   el.onclick=()=>fn(el.dataset.n);
-  el.onmouseenter=()=>{const n=el.dataset.n;
-    const f=feats.find(x=>x.name===n); if(f){hover=f;draw();}};
-  el.onmouseleave=()=>{hover=null;draw();};
+  el.onmouseenter=()=>{const f=feats.find(x=>x.name===el.dataset.n); if(f) previewOn(f);};
+  el.onmouseleave=()=>previewOff();
 });}
+
+/* Hovering a list row must make its territory findable. Zooming to fit is the
+   obvious move and the wrong one: RO-Gandhinagar's Rajasthan slice is 0.04% of
+   the state, so fitting it fills the screen with flat colour and loses all
+   context. Instead we mark it -- a pulsing ring plus a leader label -- and pan
+   only when the target sits outside the current viewport. */
+function previewOn(f){
+  hover=f;
+  if(previewTimer) clearTimeout(previewTimer);
+  const [a,b,c,d]=bbox(f.geom), w=W/DPR, h=H/DPR;
+  const cx=px((a+c)/2), cy=py((b+d)/2);
+  const off = cx<40||cy<40||cx>w-40||cy>h-40;
+  if(off){
+    if(!previewHome){
+      const t=anim.target;
+      previewHome=(t&&t.scale>0)?{scale:t.scale,tx:t.tx,ty:t.ty}:{scale,tx,ty};
+    }
+    previewTimer=setTimeout(()=>{                 // pan, same scale
+      anim(scale, tx+(w/2-cx), ty+(h/2-cy), 300);
+    },170);
+  }
+  draw();
+}
+function previewOff(){
+  hover=null;
+  if(previewTimer){clearTimeout(previewTimer);previewTimer=null;}
+  if(previewHome&&previewHome.scale>0){const p=previewHome;previewHome=null;anim(p.scale,p.tx,p.ty,260);}
+  else {previewHome=null;draw();}
+}
+
 function projCard(p){
   const pp=p.physical_progress_pct!=null?+p.physical_progress_pct:null;
   const col=pp==null?'var(--ink-3)':pp>=75?'var(--good)':pp>=35?'var(--warn)':'var(--crit)';
@@ -539,9 +663,10 @@ function legend(title,items){
      <span class="ct">${it.c}</span></button>`).join('');
   $('#legend-items').querySelectorAll('.it').forEach((el,i)=>{
     el.onclick=()=>go(items[i].v);
-    el.onmouseenter=()=>{const f=feats.find(x=>x.name===items[i].v.piu||x.name===items[i].v.ro||x.name===items[i].v.state);
-      if(f){hover=f;draw();}};
-    el.onmouseleave=()=>{hover=null;draw();};
+    el.onmouseenter=()=>{const v=items[i].v;
+      const f=feats.find(x=>x.name===(v.piu||v.ro||v.state));
+      if(f) previewOn(f);};
+    el.onmouseleave=()=>previewOff();
   });
 }
 
