@@ -1,0 +1,43 @@
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <h1>NHAI Network</h1>
+      <span class="sub">Zone · RO · PIU · Project</span>
+    </div>
+    <nav class="crumbs" id="crumbs" aria-label="Drill-down path"></nav>
+    <div class="tools">
+      <div class="search">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="q" type="search" placeholder="Search UPC, project, PIU…" autocomplete="off">
+      </div>
+      <button class="icon-btn" id="theme" title="Toggle theme" aria-label="Toggle theme">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="main">
+    <div class="stage">
+      <canvas id="map"></canvas>
+      <div class="hint" id="hint"></div>
+      <div class="legend" id="legend" hidden>
+        <h4 id="legend-h">Regional Offices</h4>
+        <div class="items" id="legend-items"></div>
+      </div>
+      <div class="zoomer">
+        <button id="zin" title="Zoom in" aria-label="Zoom in">+</button>
+        <button id="zout" title="Zoom out" aria-label="Zoom out">−</button>
+        <button id="zfit" title="Reset view" aria-label="Reset view">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <aside class="rail">
+      <div class="rail-h" id="rail-h"></div>
+      <div class="stats" id="stats"></div>
+      <div class="scroll" id="rail-body"></div>
+    </aside>
+  </div>
+</div>
+<div id="tip" role="tooltip" aria-hidden="true"></div>
