@@ -301,6 +301,26 @@ with a collision check so two labels never overlap. This is why
 "Dadra and Nagar Haveli and Daman and Diu" no longer sprawls across Maharashtra —
 the hover tooltip still gives the full name.
 
+**Context stays coloured.** Drilling into a state no longer blanks the rest of
+India: every other state keeps its own colour at 45% opacity, so the map still
+reads as a map and the active territory reads as the subject. Below an RO, the
+parent state's other ROs are painted at 26% too, otherwise a sibling RO's area
+would sit white inside a state that is clearly not empty. The India view is
+unchanged -- full-strength colour, no muting.
+
+**Two camera/geometry gotchas fixed here:**
+
+- `resize()` recomputes `fitS`/`fitX`/`fitY` but leaves `scale`/`tx`/`ty` from
+  the old canvas, so the camera silently aimed elsewhere. Since the rail's fonts
+  settle *after* the first paint, an RO opened early rendered far off-centre.
+  `resize()` now calls `refit(0)` to re-frame the current level.
+- RO territories unioned **every** copy of an ambiguous district, so RO-Nagpur
+  claimed Aurangabad in Bihar and RO-Mumbai claimed Raigarh in Chhattisgarh --
+  the detached blobs floating beside Maharashtra. `ro_extra` now uses the state
+  named in `master_ro_district`, and `drop_slivers()` discards negligible
+  outlying fragments (a 0.014-area speck near Chennai was stretching
+  RO-Nagpur's bbox 5 degrees south and wrecking the fit).
+
 **Row hover** highlights the territory and pans (never zooms) only when the
 target sits outside the viewport, restoring on mouse-out. Zoom-to-fit was tried
 and rejected: RO-Gandhinagar's slice of Rajasthan is ~0.04% of the state, so a

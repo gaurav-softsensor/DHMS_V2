@@ -73,9 +73,31 @@ function resize(){
   DPR=Math.min(devicePixelRatio||1,2);
   const r=cv.parentElement.getBoundingClientRect();
   const w=Math.max(r.width||0,320), h=Math.max(r.height||0,320);
-  W=Math.round(w*DPR); H=Math.round(h*DPR);
+  const nW=Math.round(w*DPR), nH=Math.round(h*DPR);
+  const changed=(nW!==W||nH!==H);
+  W=nW; H=nH;
   cv.width=W;cv.height=H;
-  ctx.setTransform(DPR,0,0,DPR,0,0); fit(); draw();
+  ctx.setTransform(DPR,0,0,DPR,0,0); fit();
+  // fit() rebuilds fitS/fitX/fitY, so a camera set for the old canvas now aims
+  // somewhere else. Re-frame the level instead of drawing a stale view (this is
+  // why an RO opened before fonts settled appeared far off-centre).
+  if(changed && !resize._first) refit(0);
+  resize._first=false;
+  draw();
+}
+/* Frame whatever the current level should show. ms=0 snaps without animating. */
+function refit(ms=520){
+  const f=currentFeatures();
+  if(view.level==='india'){ anim(1,0,0,ms); return; }
+  if(view.level==='project'){
+    const p=D.projects.find(x=>x.upc===view.project);
+    if(p&&p.lat!=null){ const w=W/DPR,h=H/DPR,ns=Math.min(Math.max(scale,7),9);
+      const cx=fitX+(p.lon-LON0)*fitS*ns, cy=fitY+(my1-MLAT(p.lat))*fitS*ns;
+      anim(ns,w/2-cx,h/2-cy,ms); return; }
+  }
+  if(view.level==='state'&&STATES[view.state]&&STATES[view.state].geom
+     &&!(ST_HOME_ROS[view.state]||[]).length){ flyTo(STATES[view.state].geom,ms,6); return; }
+  if(f.length) flyTo(unionBox(f),ms); else draw();
 }
 
 /* ---------- geometry helpers ---------- */
@@ -197,6 +219,31 @@ function draw(){
   feats=currentFeatures();
   const line=cs.getPropertyValue('--line-2').trim();
 
+  // Context: states we are not drilled into keep their normal colour, muted so
+  // the active one reads as the subject rather than the only thing on the map.
+  if(view.level!=='india'){
+    ctx.globalAlpha=.45;
+    D.states.forEach(st=>{
+      if(!st.geom) return;
+      path(st.geom);
+      ctx.fillStyle=fill(ST_H[st.name]); ctx.fill('evenodd');
+      ctx.strokeStyle=line; ctx.lineWidth=.7; ctx.stroke();
+    });
+    ctx.globalAlpha=1;
+    // Below an RO, the rest of its own state would otherwise sit white where the
+    // sibling RO's territory is; paint the parent's ROs so the gap reads as map.
+    if(view.level!=='state'&&view.state){
+      ctx.globalAlpha=.26;                       // quieter than the active PIUs
+      (ST_HOME_ROS[view.state]||[]).forEach(rn=>{
+        const r=ROS[rn]; if(!r||!r.geom||rn===view.ro) return;
+        path(r.geom);
+        ctx.fillStyle=fill(RO_H[rn]); ctx.fill('evenodd');
+        ctx.strokeStyle=line; ctx.lineWidth=.7; ctx.stroke();
+      });
+      ctx.globalAlpha=1;
+    }
+  }
+
   feats.forEach(f=>{
     const adm=f.kind==='state'&&f.d&&f.d.admin_only;
     const hu=adm?hueOf('ro',f.d.admin_ro):hueOf(f.kind,f.name);
@@ -206,13 +253,6 @@ function draw(){
     ctx.fillStyle=on?fillHi(hu):fill(hu); ctx.fill('evenodd'); ctx.globalAlpha=1;
     ctx.strokeStyle=on?solid(hu):line; ctx.lineWidth=on?2:.7; ctx.stroke();
   });
-  // state borders stay visible at every level, so a territory always reads
-  // against the country it sits in rather than floating on blank paper
-  if(view.level!=='india'){
-    ctx.strokeStyle=dark()?'rgba(236,238,241,.20)':'rgba(27,31,38,.16)';
-    ctx.lineWidth=.8;
-    D.states.forEach(st=>{ if(st.geom){ path(st.geom); ctx.stroke(); } });
-  }
   ctx.restore();
 
   // outline on top
@@ -442,20 +482,7 @@ function go(v){
   if(previewTimer){clearTimeout(previewTimer);previewTimer=null;}
   previewHome=null;
   render();
-  const f=currentFeatures();
-  if(view.level==='india') anim(1,0,0,480);
-  else if(view.level==='project'){ const p=D.projects.find(x=>x.upc===view.project);
-    if(p&&p.lat!=null){ const w=W/DPR,h=H/DPR,ns=Math.min(Math.max(scale,7),9);
-      const cx=fitX+(p.lon-LON0)*fitS*ns, cy=fitY+(my1-MLAT(p.lat))*fitS*ns;
-      anim(ns,w/2-cx,h/2-cy,520);} else if(f.length) flyTo(unionBox(f)); }
-  else if(view.level==='state'&&STATES[view.state]&&STATES[view.state].geom
-          &&!(ST_HOME_ROS[view.state]||[]).length){
-    // administered state: frame the state, capped so a tiny one (Goa, Sikkim,
-    // the UTs) keeps its surroundings rather than filling the screen
-    flyTo(STATES[view.state].geom,520,6);
-  }
-  else if(f.length) flyTo(unionBox(f));
-  else draw();
+  refit(480);
 }
 window.go=go;
 

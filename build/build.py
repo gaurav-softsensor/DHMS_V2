@@ -236,6 +236,18 @@ print('ros with pius:',len(ro_pius))
 print('districts->state done',len(D2S))
 
 # ================= territories =================
+
+# Drop negligible outlying fragments: a 0.014-area sliver near Chennai stretched
+# RO-Nagpur's bbox 5 degrees south and wrecked the camera fit. Keep any part
+# that is a meaningful share of the territory, discard specks.
+def drop_slivers(g, keep_frac=0.02, min_area=0.05):
+    if g.is_empty or g.geom_type != 'MultiPolygon':
+        return g
+    parts = sorted(g.geoms, key=lambda p: -p.area)
+    big = parts[0].area
+    kept = [p for p in parts if p.area >= max(big*keep_frac, min_area) or p is parts[0]]
+    return unary_union(kept) if len(kept) > 1 else parts[0]
+
 def simp(g,tol=0.008):
     g=g.simplify(tol,preserve_topology=True).buffer(0)
     return g
@@ -266,7 +278,7 @@ for rn in ros:
         if g0 is not None: parts.append(g0)
     parts.extend(ro_extra.get(rn,()))
     if parts:
-        g=unary_union(parts).intersection(outline)
+        g=drop_slivers(unary_union(parts).intersection(outline))
         if not g.is_empty: ROGEO[rn]=g
 print('RO polys',len(ROGEO),'PIU polys',len(PIUGEO))
 
