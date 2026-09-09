@@ -74,7 +74,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 #map{position:absolute;inset:0;display:block;width:100%;height:100%;cursor:grab;touch-action:none}
 #map.drag{cursor:grabbing}
 
-.legend{position:absolute;left:14px;bottom:14px;background:var(--panel);border:1px solid var(--line);
+.legend{position:absolute;left:14px;top:52px;background:var(--panel);border:1px solid var(--line);
   border-radius:var(--r);box-shadow:var(--shadow);padding:10px 12px;max-width:250px;max-height:44%;
   display:flex;flex-direction:column;gap:7px}
 .legend h4{margin:0;font-size:9.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-3);font-weight:700}
@@ -371,6 +371,7 @@ function hit(g,x,y){ if(!g)return false;
 let view={level:'india',state:null,ro:null,piu:null,project:null};
 let hover=null, feats=[], zoomTarget=null;
 let previewHome=null, previewTimer=null;   // row-hover camera preview
+let labelHits=[];                          // on-screen label boxes, for clicks
 
 function currentFeatures(){
   if(view.level==='india') return D.states.filter(s=>s.geom).map(s=>({kind:'state',name:s.name,geom:s.geom,d:s}));
@@ -457,14 +458,19 @@ function draw(){
   // Context: states we are not drilled into keep their normal colour, muted so
   // the active one reads as the subject rather than the only thing on the map.
   if(view.level!=='india'){
-    ctx.globalAlpha=.45;
+    // Each surrounding state keeps its own hue and gets a visible border, so
+    // neighbours read as separate territories instead of one wash.
+    const ctxBorder=dark()?'rgba(236,238,241,.34)':'rgba(27,31,38,.30)';
     D.states.forEach(st=>{
       if(!st.geom) return;
+      const hu=ST_H[st.name];
       path(st.geom);
-      ctx.fillStyle=fill(ST_H[st.name]); ctx.fill('evenodd');
-      ctx.strokeStyle=line; ctx.lineWidth=.7; ctx.stroke();
+      ctx.globalAlpha=.5;
+      ctx.fillStyle=fill(hu); ctx.fill('evenodd');
+      ctx.globalAlpha=1;
+      ctx.strokeStyle=st.name===view.state?line:ctxBorder;
+      ctx.lineWidth=st.name===view.state?1.1:.9; ctx.stroke();
     });
-    ctx.globalAlpha=1;
     // Below an RO, the rest of its own state would otherwise sit white where the
     // sibling RO's territory is; paint the parent's ROs so the gap reads as map.
     if(view.level!=='state'&&view.state){
@@ -518,80 +524,123 @@ function draw(){
   }
 
   // labels
+  labelHits=[];
   if(feats.length<=60){
     ctx.font='600 11px "Public Sans",system-ui,sans-serif';
     ctx.textBaseline='middle';
-    const SHORT={'Dadra and Nagar Haveli and Daman and Diu':'DNH & DD',
-      'Andaman and Nicobar':'A & N Islands','Jammu and Kashmir':'J & K',
-      'Arunachal Pradesh':'Arunachal','Himachal Pradesh':'Himachal'};
 
-    // Pass 1: measure every feature and decide inline vs. leader-line callout.
-    // Small territories (Goa, Mizoram, Delhi, the UTs) can never fit their name,
-    // so they get a label outside the shape joined by a line to their centroid.
+    // Union Territories are small enough that an inside label never fits well,
+    // and abbreviating them ("DNH & DD") loses the name. They always get a
+    // leader-line callout carrying the full name.
+    const ALWAYS_CALLOUT=new Set(['Andaman and Nicobar','Chandigarh',
+      'Dadra and Nagar Haveli and Daman and Diu','Lakshadweep','Puducherry']);
+    // Long names that will not fit a small shape get a shorter *real* name
+    // rather than an initialism, so the label still reads as the place.
+    const TRIM={'Dadra and Nagar Haveli and Daman and Diu':'Daman & Diu',
+      'Andaman and Nicobar':'Andaman & Nicobar'};
+
+    // Pass 1: decide inline vs. callout, measuring the FULL name in both cases.
     const inline=[], callout=[];
     feats.forEach(f=>{
       const c=centroid(f.geom); if(!c) return;
       const x=px(c[0]), y=py(c[1]);
-      if(x<-40||y<-40||x>w+40||y>h+40) return;
+      if(x<-60||y<-60||x>w+60||y>h+60) return;
       const [a,b,cc,dd]=bbox(f.geom);
       const bw=(cc-a)*fitS*scale, bh=(MLAT(dd)-MLAT(b))*fitS*scale;
-      const full=f.kind==='ro'?roLabel(f.name):f.kind==='piu'?piuLabel(f.name):f.name;
-      const t=(bw<ctx.measureText(full).width+6 && SHORT[f.name])?SHORT[f.name]:full;
+      let t=f.kind==='ro'?roLabel(f.name):f.kind==='piu'?piuLabel(f.name):f.name;
+      const forced=f.kind==='state'&&ALWAYS_CALLOUT.has(f.name);
+      if(forced && TRIM[f.name]) t=TRIM[f.name];
       const tw=ctx.measureText(t).width;
-      if(tw<=bw-6 && bh>=13) inline.push({f,x,y,t,tw});
+      if(!forced && tw<=bw-6 && bh>=13) inline.push({f,x,y,t,tw});
       else callout.push({f,x,y,t,tw,r:Math.max(bw,bh)/2});
     });
 
+    // The legend, hint pill and zoom buttons float over the canvas; seed them
+    // as occupied so a label is never placed underneath one.
     const placed=[];
+    const stageBox=cv.getBoundingClientRect();
+    ['#legend','#hint','.zoomer'].forEach(sel=>{
+      const el=document.querySelector(sel);
+      if(!el||el.hidden) return;
+      const r=el.getBoundingClientRect();
+      if(!r.width) return;
+      placed.push({x1:r.left-stageBox.left-6,y1:r.top-stageBox.top-6,
+                   x2:r.right-stageBox.left+6,y2:r.bottom-stageBox.top+6});
+    });
     const clash=q=>placed.some(p=>!(q.x2<p.x1||q.x1>p.x2||q.y2<p.y1||q.y1>p.y2));
     const paint=(t,x,y)=>{
       ctx.lineWidth=3.2; ctx.strokeStyle=dark()?'rgba(20,23,28,.85)':'rgba(255,255,255,.9)';
       ctx.strokeText(t,x,y); ctx.fillStyle=ink; ctx.fillText(t,x,y);
     };
+    // remember where each label landed so a click can target it
+    const noteHit=(f,x1,y1,x2,y2)=>labelHits.push({f,x1,y1,x2,y2});
 
-    // Pass 2: inline labels first — they own the space they sit in.
+    // Pass 2: inline labels first -- they own the space they sit in.
     ctx.textAlign='center';
     inline.forEach(o=>{
       const box={x1:o.x-o.tw/2-2,y1:o.y-7,x2:o.x+o.tw/2+2,y2:o.y+7};
       if(clash(box)) return;
       placed.push(box); paint(o.t,o.x,o.y);
+      noteHit(o.f,box.x1,box.y1,box.x2,box.y2);
     });
 
-    // Pass 3: callouts. Try 8 directions at growing distance, take the first
-    // slot that is on-canvas and collides with nothing already drawn.
-    const DIRS=[[1,-1],[1,0],[1,1],[-1,-1],[-1,0],[-1,1],[0,-1],[0,1]];
-    const lineCol=dark()?'rgba(236,238,241,.55)':'rgba(27,31,38,.45)';
+    // Pass 3: callouts. Try 8 directions at growing distance; take the first
+    // slot on-canvas that collides with nothing already drawn. Offshore
+    // territories (Lakshadweep, A&N) need a long lead to clear the coastline.
+    // horizontal first: a level leader reads cleanly and rarely crosses another
+    const DIRS=[[1,0],[-1,0],[1,-1],[-1,-1],[1,1],[-1,1],[0,-1],[0,1]];
+    // Small coastal/offshore territories must land in open space, not on top of
+    // a big neighbour: DNH & DD sat inside Maharashtra, Lakshadweep on Kerala.
+    // Preferred callout direction -- all four go out to sea, away from the
+    // mainland labels they would otherwise sit on top of.
+    const SEAWARD={'Lakshadweep':[-1,0],'Andaman and Nicobar':[1,0],
+      'Puducherry':[1,0],'Dadra and Nagar Haveli and Daman and Diu':[-1,0]};
+    const OVERLAND=new Set();
+    const lineCol=dark()?'rgba(236,238,241,.6)':'rgba(27,31,38,.5)';
     callout.forEach(o=>{
       let best=null;
-      for(const step of [10,16,24,34,48,64]){
-        for(const [dx,dy] of DIRS){
+      const pref=SEAWARD[o.f.name];
+      // An offshore label prefers its own latitude so the leader never cuts
+      // across the mainland, but may drift vertically if that slot is taken
+      // (the legend occupies the sea west of Lakshadweep).
+      // Offshore labels stay on their own latitude (or drift slightly) so the
+      // leader never cuts across the mainland. The legend sits top-left to
+      // leave this water free.
+      const dirs=pref?[pref,[pref[0],-1],[pref[0],1]]:DIRS;
+      const steps=pref?(OVERLAND.has(o.f.name)?[52,70,90,112,136]:[16,26,38,52])
+                      :[8,13,19,26,35,46];
+      for(const step of steps){
+        for(const [dx,dy] of dirs){
           const lead=o.r+step;
           const lx=o.x+dx*lead, ly=o.y+dy*lead;
           const right=dx>=0;
           const tx0=lx+(right?5:-5);
           const x1=right?tx0:tx0-o.tw, x2=right?tx0+o.tw:tx0;
           if(x1<3||x2>w-3||ly<9||ly>h-9) continue;
-          const box={x1:x1-2,y1:ly-7,x2:x2+2,y2:ly+7};
+          const padY=OVERLAND.has(o.f.name)?13:7;
+          const box={x1:x1-2,y1:ly-padY,x2:x2+2,y2:ly+padY};
           if(clash(box)) continue;
+          // an offshore/coastal territory must not have its label dumped back
+          // on the mainland: require open water at the label anchor
+          if(pref&&!OVERLAND.has(o.f.name)){
+            const g=toGeo(lx,ly);
+            if(hit(D.outline,g[0],g[1])) continue;
+          }
           best={lx,ly,tx0,right,box}; break;
         }
         if(best) break;
       }
       if(!best) return;
       placed.push(best.box);
-      // anchor on the outline point nearest the label so the line never
-      // crosses back over the shape (Lakshadweep -> Kerala was the giveaway)
-      let ax=o.x, ay=o.y, ad=1e18;
-      eachRing(o.f.geom,ring=>{ for(let k=0;k<ring.length;k+=2){
-        const rx=px(ring[k][0]), ry=py(ring[k][1]);
-        const dd2=(rx-best.lx)*(rx-best.lx)+(ry-best.ly)*(ry-best.ly);
-        if(dd2<ad){ad=dd2;ax=rx;ay=ry;} } });
-      ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(best.lx,best.ly);
+      // The leader starts at the territory's centre, so the line always points
+      // at the shape it names rather than grazing its edge.
+      ctx.beginPath(); ctx.moveTo(o.x,o.y); ctx.lineTo(best.lx,best.ly);
       ctx.strokeStyle=lineCol; ctx.lineWidth=1; ctx.stroke();
-      ctx.beginPath(); ctx.arc(ax,ay,1.9,0,7); ctx.fillStyle=lineCol; ctx.fill();
+      ctx.beginPath(); ctx.arc(o.x,o.y,2.1,0,7); ctx.fillStyle=lineCol; ctx.fill();
       ctx.textAlign=best.right?'left':'right';
       paint(o.t,best.tx0,best.ly);
       ctx.textAlign='center';
+      noteHit(o.f,best.box.x1,best.box.y1,best.box.x2,best.box.y2);
     });
   }
 }
@@ -606,6 +655,13 @@ function toGeo(cx,cy){
 function pick(cx,cy){
   const [lon,lat]=toGeo(cx,cy);
   for(let i=feats.length-1;i>=0;i--) if(hit(feats[i].geom,lon,lat)) return feats[i];
+  return null;
+}
+function pickLabel(cx,cy){
+  for(let i=labelHits.length-1;i>=0;i--){
+    const b=labelHits[i];
+    if(cx>=b.x1-3&&cx<=b.x2+3&&cy>=b.y1-3&&cy<=b.y2+3) return b.f;
+  }
   return null;
 }
 function pickProject(cx,cy){
@@ -673,7 +729,7 @@ cv.addEventListener('pointermove',e=>{
     tx=drag.tx+dx; ty=drag.ty+dy; draw(); hideTip(); return; }
   const pj=pickProject(cx,cy);
   if(pj){ hover=null; draw(); showTip(tipForProject(pj),e.clientX,e.clientY); cv.style.cursor='pointer'; return; }
-  const f=pick(cx,cy);
+  const f=pickLabel(cx,cy)||pick(cx,cy);
   if(f){ if(!hover||hover.name!==f.name||hover.kind!==f.kind){hover=f;draw();}
     showTip(tipFor(f),e.clientX,e.clientY);
     cv.style.cursor=view.level==='piu'||view.level==='project'?'default':'pointer'; }
@@ -686,7 +742,9 @@ cv.addEventListener('pointerup',e=>{
   const r=cv.getBoundingClientRect(),cx=e.clientX-r.left,cy=e.clientY-r.top;
   const pj=pickProject(cx,cy);
   if(pj){ go({level:'project',state:pj.state_name,ro:pj.region_name,piu:pj.piu_name,project:pj.upc}); return; }
-  const f=pick(cx,cy); if(!f)return;
+  // a label is a target in its own right -- the only way to reach a territory
+  // too small to click, and it works for the leader-line callouts too
+  const f=pickLabel(cx,cy)||pick(cx,cy); if(!f)return;
   if(f.kind==='state'){
     if(f.d&&f.d.admin_only&&f.d.admin_ro) go({level:'ro',state:f.name,ro:f.d.admin_ro});
     else go({level:'state',state:f.name});

@@ -326,6 +326,33 @@ target sits outside the viewport, restoring on mouse-out. Zoom-to-fit was tried
 and rejected: RO-Gandhinagar's slice of Rajasthan is ~0.04% of the state, so a
 fit filled the screen with flat colour and lost all context.
 
+**Labels are clickable.** Every drawn label registers its box in `labelHits`,
+and `pickLabel()` is tried before the polygon hit-test, so a territory too small
+to click (Lakshadweep, Chandigarh, DNH & DD) is reachable by its label -- which
+is also the only practical way to reach an offshore one.
+
+**Callouts are rationed.** Only five territories are forced outside
+(`ALWAYS_CALLOUT`: Chandigarh, DNH & DD, Lakshadweep, Puducherry, A&N) -- the
+ones where no inside label can fit. Everything else, Goa and the north-eastern
+states included, takes an inside label whenever its own shape has room; forcing
+them all outside produced a thicket of crossing leader lines. Leader steps are
+short (8-46px) and horizontal directions are tried first, so lines stay level
+and rarely cross.
+
+Two long names carry a shorter **real** name rather than an initialism
+(`TRIM`): "Daman & Diu", "Andaman & Nicobar".
+
+All four coastal/offshore labels (`SEAWARD`) are pinned to their own latitude
+so a leader never cuts across the mainland, and a candidate is rejected if it
+lands on the landmass. Daman & Diu goes left into the Arabian Sea for the same
+reason -- rightward put it on top of Maharashtra. **The legend sits top-left for this reason** -- bottom-left
+covers the Arabian Sea west of Lakshadweep, which is the only place its label can
+go. Overlay panels (legend, hint, zoom buttons) are seeded into the collision
+set, so no label hides behind one.
+
+**Leaders start at the territory's centre**, not the nearest outline point, so
+the line always points at the shape it names.
+
 **Small states get leader lines.** Labels are placed in two passes — inline where
 the name fits inside the shape, otherwise a callout outside it joined by a line
 to the nearest point on its outline (not its centroid, which made the
