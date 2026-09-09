@@ -143,8 +143,33 @@ First match wins; the project detail panel always states which applied.
 | PIU district centroid | 264 | **Approximate** — no coordinates in either source |
 | None | 7 | Listed in panels, not drawn on the map |
 
-The 264 approximate ones draw as smaller, half-opacity dots so an inferred
-position is never mistaken for a survey fix.
+The approximate ones draw as smaller, half-opacity dots so an inferred position
+is never mistaken for a survey fix.
+
+### Three guards against wrongly placed dots
+
+A Himachal project was appearing near Gujarat. Three separate causes, all now
+checked at build time:
+
+1. **Duplicate district names.** Seven ADM2 names exist in two states
+   (Hamirpur, Aurangabad, Bilaspur, Pratapgarh, Balrampur, Raigarh). `DGEO` was
+   a `name -> geometry` dict, so one of each pair was silently dropped and
+   HP's PIU-Hamirpur resolved to the *Uttar Pradesh* Hamirpur, ~450 km away.
+   `DGEO_ALL` now keeps every polygon and `resolve_in_state()` picks the copy in
+   the state the PIU actually works in.
+2. **Placeholder coordinates.** One pair (22.9807, 77.6007 -- near Bhopal)
+   repeats 26 times in the NSV CSV across unrelated projects in different
+   states; a second repeats 8 times. Any pair reused by >= 6 distinct UPCs is
+   rejected as a placeholder.
+3. **Out-of-state coordinates.** A DB or CSV coordinate is only used if it falls
+   within 0.25 deg of the project's own state.
+
+Rejected coordinates fall back to the PIU district, so the project is still
+plotted -- just honestly, as an approximation.
+
+This cut projects drawn outside their own state from **25 to 4**. The remaining
+four are genuine: their PIU office sits in a neighbouring state (CMU Mathura is
+in UP but serves Delhi and Haryana; Hyderabad serves Andhra Pradesh).
 
 ## How territories are built
 
@@ -154,6 +179,24 @@ position is never mistaken for a survey fix.
 3. **Leftover fill** — any part of a state not claimed by a PIU district joins
    the RO working there. Where a state has several ROs, each leftover piece joins
    whichever RO's territory it actually adjoins.
+
+### Projects belong to an RO, never to a state
+
+A state is a **navigational grouping only** — it exists because we have a
+state->RO mapping. Every figure on the page aggregates by RO/PIU:
+
+- **State view** totals the portfolios of the ROs *based in* that state
+  (`home_state`). Rajasthan reads 86 — RO-Jaipur's whole portfolio, including
+  its work over the border — not the 89 projects that happen to sit inside
+  Rajasthan.
+- An RO based elsewhere that runs a corridor across the border is a **visitor**:
+  listed under "Also operating here" with its local count, but its portfolio
+  counts toward its own state. RO-Delhi's 49 belong to Delhi, not Rajasthan.
+- **RO view** always shows that RO's complete portfolio, never scoped to the
+  state you arrived through.
+- 14 states have no RO of their own (Goa, Ladakh, the NE states, the UTs). They
+  read "Administered from RO-X" and report only work actually located there —
+  Goa is 1 project, not RO-Mumbai's 45.
 
 ### Clipping: ROs that cross state lines
 
@@ -258,11 +301,10 @@ with a collision check so two labels never overlap. This is why
 "Dadra and Nagar Haveli and Daman and Diu" no longer sprawls across Maharashtra —
 the hover tooltip still gives the full name.
 
-**Row hover** marks the territory with a ring and a label chip rather than
-zooming to fit it. Fitting was tried and rejected: RO-Gandhinagar's slice of
-Rajasthan is ~0.04% of the state, so a fit filled the screen with flat colour and
-lost all context. The camera pans (never zooms) only when the target is outside
-the viewport, and restores on mouse-out.
+**Row hover** highlights the territory and pans (never zooms) only when the
+target sits outside the viewport, restoring on mouse-out. Zoom-to-fit was tried
+and rejected: RO-Gandhinagar's slice of Rajasthan is ~0.04% of the state, so a
+fit filled the screen with flat colour and lost all context.
 
 **Small states get leader lines.** Labels are placed in two passes — inline where
 the name fits inside the shape, otherwise a callout outside it joined by a line

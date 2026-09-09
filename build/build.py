@@ -30,7 +30,15 @@ raw = json.load(open(DATA / 'raw.json'))
 
 # ---------- boundaries ----------
 dj=json.load(open(B+'india-districts.gb-adm2.geojson'))
-DGEO={f['properties']['shapeName']:shape(f['geometry']).buffer(0) for f in dj['features']}
+# Seven ADM2 names occur in two states (Hamirpur, Aurangabad, Bilaspur,
+# Pratapgarh, Balrampur, Raigarh). Keep every polygon -- a plain name->geom dict
+# silently drops one of each pair, which is what put HP's PIU-Hamirpur on the
+# Uttar Pradesh Hamirpur, ~450 km away. DGEO holds the merged shape for callers
+# that just need "the district called X"; DGEO_ALL keeps the alternatives.
+DGEO_ALL=collections.defaultdict(list)
+for f in dj['features']:
+    DGEO_ALL[f['properties']['shapeName']].append(shape(f['geometry']).buffer(0))
+DGEO={n:(gs[0] if len(gs)==1 else unary_union(gs)) for n,gs in DGEO_ALL.items()}
 sj=json.load(open(B+'india-states.ne10m.geojson'))
 SGEO={f['properties']['name']:shape(f['geometry']).buffer(0) for f in sj['features']}
 outline=shape(json.load(open(B+'india-outline.official.geojson'))['features'][0]['geometry']).buffer(0)
@@ -76,9 +84,68 @@ with open(CSV) as fh:
             if u: coord.setdefault(u.replace('_','/'),(sla,slo,ela,elo,r.get('Phase'),r.get('Cycle')))
 INB=lambda la,lo: 6.0<=la<=37.5 and 68.0<=lo<=97.5
 
+# One coordinate pair repeats 32 times in the NSV CSV across unrelated projects
+# in different states -- a placeholder, not a survey fix. Any pair reused by
+# more than a handful of distinct UPCs is treated the same way.
+_pair=collections.Counter()
+for _u,_c in coord.items(): _pair[(round(_c[0],4),round(_c[1],4))]+=1
+PLACEHOLDER={k for k,n in _pair.items() if n>=6}
+if PLACEHOLDER:
+    print('placeholder coordinates ignored:',
+          ', '.join(f'{a},{b} (x{_pair[(a,b)]})' for a,b in sorted(PLACEHOLDER)))
+
+def in_state(la,lo,sn):
+    """True if the point falls in (or near) the project's own state."""
+    g=SGEO.get(sn)
+    return True if g is None else g.buffer(0.25).contains(Point(lo,la))
+
 pius={x['piu_name']:x for x in raw['pius'] if x['piu_name']}
 ros={x['region_name']:x for x in raw['ros'] if x['region_name']}
-piu_dist={p:resolve(p,DGEO) for p in pius}
+# A PIU's district name can exist in several states -- Hamirpur, Aurangabad,
+# Bilaspur, Pratapgarh, Balrampur and Raigarh each occur twice. Resolving by
+# name alone put HP's PIU-Hamirpur on the UP Hamirpur, ~450 km away. Pick the
+# candidate that lies in the state the PIU actually works in.
+_dstate = {}
+for _dn, _g in DGEO.items():
+    _pt = _g.representative_point()
+    _dstate[_dn] = next((sn for sn, sg in SGEO.items() if sg.contains(_pt)), None)
+
+_piu_states = collections.defaultdict(collections.Counter)
+for _p in raw['projects']:
+    if _p.get('piu_name') and _p.get('state_name'):
+        _piu_states[_p['piu_name']][_p['state_name']] += 1
+for _p in raw['pius']:                      # fall back to the RO's home state
+    if _p.get('piu_name') and _p.get('ro_home_state') and not _piu_states[_p['piu_name']]:
+        _piu_states[_p['piu_name']][_p['ro_home_state']] += 1
+
+def resolve_in_state(name, want):
+    """Resolve a PIU to (district, geometry), preferring the copy in `want`."""
+    base = resolve(name, DGEO)
+    if not base:
+        return None, None
+    alts = DGEO_ALL.get(base, [])
+    if want and len(alts) > 1:
+        for g in alts:
+            pt = g.representative_point()
+            if next((sn for sn, sg in SGEO.items() if sg.contains(pt)), None) == want:
+                return base, g
+    return base, DGEO.get(base)
+
+piu_dist, PIU_SHAPE = {}, {}
+_moved = []
+for p in pius:
+    want = _piu_states[p].most_common(1)[0][0] if _piu_states[p] else None
+    dn, g = resolve_in_state(p, want)
+    piu_dist[p] = dn
+    if g is not None:
+        PIU_SHAPE[p] = g
+        if dn and len(DGEO_ALL.get(dn, [])) > 1:
+            _moved.append((p, dn, want))
+if _moved:
+    print('ambiguous district names resolved by state:')
+    for p, dn, w in _moved:
+        print(f'   PIU-{p:14s} -> {dn} in {w}')
+
 
 
 # ---- state correction, narrowly scoped -------------------------------------
@@ -123,15 +190,19 @@ projects=[]
 srcstat=collections.Counter()
 for p in raw['projects']:
     la=lo=ela=elo=None; src='none'; phase=cycle=None
-    if p['start_lat'] and p['start_lng'] and INB(float(p['start_lat']),float(p['start_lng'])):
+    _sn=p.get('state_name')
+    if (p['start_lat'] and p['start_lng'] and INB(float(p['start_lat']),float(p['start_lng']))
+            and in_state(float(p['start_lat']),float(p['start_lng']),_sn)):
         la,lo=float(p['start_lat']),float(p['start_lng']); src='db'
         if p['end_lat'] and p['end_lng']: ela,elo=float(p['end_lat']),float(p['end_lng'])
     elif p['upc'] in coord:
         c=coord[p['upc']]
-        if INB(c[0],c[1]): la,lo,ela,elo,phase,cycle=c[0],c[1],c[2],c[3],c[4],c[5]; src='csv'
+        if (INB(c[0],c[1]) and (round(c[0],4),round(c[1],4)) not in PLACEHOLDER
+                and in_state(c[0],c[1],_sn)):
+            la,lo,ela,elo,phase,cycle=c[0],c[1],c[2],c[3],c[4],c[5]; src='csv'
     if la is None:
-        d=piu_dist.get(p['piu_name'])
-        if d: pt=DGEO[d].representative_point(); la,lo=pt.y,pt.x; src='piu'
+        g=PIU_SHAPE.get(p['piu_name'])
+        if g is not None: pt=g.representative_point(); la,lo=pt.y,pt.x; src='piu'
     srcstat[src]+=1
     projects.append({**p,'lat':la,'lon':lo,'elat':ela,'elon':elo,'geo_src':src,'phase':phase,'cycle':cycle})
 print('coord src:',dict(srcstat))
@@ -144,11 +215,23 @@ for pn,x in pius.items():
 for p in projects:
     if p['piu_name'] and p['region_name']: ro_pius[p['region_name']].add(p['piu_name'])
 # RO districts table adds territory
-ro_extra=collections.defaultdict(set)
+# master_ro_district names a state alongside the district, so an ambiguous name
+# (Aurangabad, Raigarh, ...) resolves to the right copy instead of both.
+ro_extra=collections.defaultdict(list)
 for d in raw['districts']:
     if d['region_name'] and d['district_name']:
         r=resolve(d['district_name'],DGEO)
-        if r: ro_extra[d['region_name']].add(r)
+        if not r: continue
+        alts=DGEO_ALL.get(r,[])
+        want=d.get('state_name')
+        g=None
+        if want and len(alts)>1:
+            for a in alts:
+                pt=a.representative_point()
+                if next((sn for sn,sg in SGEO.items() if sg.contains(pt)),None)==want:
+                    g=a; break
+        if g is None: g=alts[0] if len(alts)==1 else DGEO.get(r)
+        if g is not None: ro_extra[d['region_name']].append(g)
 print('ros with pius:',len(ro_pius))
 print('districts->state done',len(D2S))
 
@@ -169,8 +252,9 @@ for i,p in enumerate(projects):
 # PIU polygon: its district, clipped to India
 PIUGEO={}
 for pn,d in piu_dist.items():
-    if d and d in DGEO:
-        g=DGEO[d].intersection(outline)
+    g0=PIU_SHAPE.get(pn)
+    if g0 is not None:
+        g=g0.intersection(outline)
         if not g.is_empty: PIUGEO[pn]=g
 
 # RO polygon = union of member PIU districts + ro_district table
@@ -178,10 +262,9 @@ ROGEO={}
 for rn in ros:
     parts=[]
     for pn in ro_pius.get(rn,()):
-        d=piu_dist.get(pn)
-        if d and d in DGEO: parts.append(DGEO[d])
-    for d in ro_extra.get(rn,()):
-        if d in DGEO: parts.append(DGEO[d])
+        g0=PIU_SHAPE.get(pn)
+        if g0 is not None: parts.append(g0)
+    parts.extend(ro_extra.get(rn,()))
     if parts:
         g=unary_union(parts).intersection(outline)
         if not g.is_empty: ROGEO[rn]=g

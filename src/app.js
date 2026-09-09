@@ -38,6 +38,21 @@ D.ros.forEach(r=>{const s=new Set(r.pius);(P_BY_RO[r.name]||[]).forEach(p=>p.piu
 const ST_ROS={};
 D.states.forEach(s=>{const m=new Set(s.ros);(P_BY_STATE[s.name]||[]).forEach(p=>p.region_name&&m.add(p.region_name));
   ST_ROS[s.name]=[...m].filter(n=>ROS[n]).sort();});
+/* A state groups the ROs based in it. An RO headquartered elsewhere that happens
+   to run a corridor across the border is a visitor: listed, but its portfolio
+   belongs to its own state's total, not this one's. */
+const ST_HOME_ROS={}, ST_VISIT_ROS={};
+D.states.forEach(s=>{
+  const home=[], visit=[];
+  ST_ROS[s.name].forEach(n=>{
+    ((ROS[n]||{}).home_state===s.name?home:visit).push(n);
+  });
+  // 14 states have no RO of their own (Goa, Ladakh, the NE states, the UTs).
+  // They keep an empty home list: inheriting RO-Mumbai's 45 Maharashtra
+  // projects as "Goa" would be plainly wrong.
+  ST_HOME_ROS[s.name]=home;
+  ST_VISIT_ROS[s.name]=visit;
+});
 
 /* ---------- projection ---------- */
 const cv=$('#map'),ctx=cv.getContext('2d');
@@ -103,43 +118,48 @@ let previewHome=null, previewTimer=null;   // row-hover camera preview
 function currentFeatures(){
   if(view.level==='india') return D.states.filter(s=>s.geom).map(s=>({kind:'state',name:s.name,geom:s.geom,d:s}));
   if(view.level==='state'){
-    // an RO working in several states shows only the slice inside this state
-    const sl=(D.ro_by_state&&D.ro_by_state[view.state])||{};
-    return ST_ROS[view.state].map(n=>ROS[n]).filter(Boolean)
-      .map(r=>({kind:'ro',name:r.name,geom:sl[r.name]||r.geom,d:r}))
-      .filter(f=>f.geom);
+    // full RO territories, not slices: the panel now reports each RO's whole
+    // portfolio, so the map must show the whole area that portfolio covers
+    let list=(ST_HOME_ROS[view.state]||[]);
+    if(!list.length) list=(ST_VISIT_ROS[view.state]||[]);
+    if(!list.length){const a=STATES[view.state]; if(a&&a.admin_ro) list=[a.admin_ro];}
+    return list.map(n=>ROS[n]).filter(r=>r&&r.geom)
+      .map(r=>({kind:'ro',name:r.name,geom:r.geom,d:r}));
   }
   if(view.level==='ro'){
-    const sl=(D.piu_by_ro&&D.piu_by_ro[view.ro])||{};
-    return RO_PIUS[view.ro].map(n=>PIUS[n]).filter(Boolean)
-      .map(p=>({kind:'piu',name:p.name,geom:sl[p.name]||p.geom,d:p}))
-      .filter(f=>f.geom);
+    return RO_PIUS[view.ro].map(n=>PIUS[n]).filter(p=>p&&p.geom)
+      .map(p=>({kind:'piu',name:p.name,geom:p.geom,d:p}));
   }
   if(view.level==='piu'||view.level==='project'){
-    const sl=(D.piu_by_ro&&D.piu_by_ro[view.ro])||{};
-    const p=PIUS[view.piu]; const g=p&&(sl[view.piu]||p.geom);
-    return g?[{kind:'piu',name:p.name,geom:g,d:p}]:[];
+    const p=PIUS[view.piu];
+    return p&&p.geom?[{kind:'piu',name:p.name,geom:p.geom,d:p}]:[];
   }
   return [];
 }
 function visibleProjects(){
   if(view.level==='india') return [];
-  if(view.level==='state') return P_BY_STATE[view.state]||[];
-  if(view.level==='ro'){
-    const all=P_BY_RO[view.ro]||[];
-    // reached via a state: show only that state's work, matching the clipped map
-    if(view.state){const inSt=all.filter(p=>p.state_name===view.state); if(inSt.length) return inSt;}
-    return all;
+  if(view.level==='state'){
+    // A state is a navigational grouping only. Its figures are the union of the
+    // ROs that operate there -- including their work in neighbouring states --
+    // because project data belongs to an RO/PIU, never to a state.
+    const home=ST_HOME_ROS[view.state]||[];
+    if(!home.length) return P_BY_STATE[view.state]||[];   // administered state
+    const seen=new Set(), out=[];
+    home.forEach(rn=>(P_BY_RO[rn]||[]).forEach(p=>{
+      if(!seen.has(p.upc)){seen.add(p.upc);out.push(p);}
+    }));
+    return out;
   }
+  if(view.level==='ro') return P_BY_RO[view.ro]||[];
   return P_BY_PIU[view.piu]||[];
 }
 
 /* ---------- camera ---------- */
-function flyTo(g,ms=520){
+function flyTo(g,ms=520,maxScale=14){
   if(!g){scale=1;tx=ty=0;return;}
   const [a,b,c,d]=bbox(g), w=W/DPR,h=H/DPR,pad=64;
   const gw=(c-a)*fitS, gh=(MLAT(d)-MLAT(b))*fitS;
-  const ns=Math.min((w-pad*2)/Math.max(gw,.001),(h-pad*2)/Math.max(gh,.001),14);
+  const ns=Math.min((w-pad*2)/Math.max(gw,.001),(h-pad*2)/Math.max(gh,.001),maxScale);
   const cx=fitX+((a+c)/2-LON0)*fitS*ns, cy=fitY+(my1-(MLAT(b)+MLAT(d))/2)*fitS*ns;
   anim(ns, w/2-cx, h/2-cy, ms);
 }
@@ -186,6 +206,13 @@ function draw(){
     ctx.fillStyle=on?fillHi(hu):fill(hu); ctx.fill('evenodd'); ctx.globalAlpha=1;
     ctx.strokeStyle=on?solid(hu):line; ctx.lineWidth=on?2:.7; ctx.stroke();
   });
+  // state borders stay visible at every level, so a territory always reads
+  // against the country it sits in rather than floating on blank paper
+  if(view.level!=='india'){
+    ctx.strokeStyle=dark()?'rgba(236,238,241,.20)':'rgba(27,31,38,.16)';
+    ctx.lineWidth=.8;
+    D.states.forEach(st=>{ if(st.geom){ path(st.geom); ctx.stroke(); } });
+  }
   ctx.restore();
 
   // outline on top
@@ -213,41 +240,6 @@ function draw(){
       ctx.lineWidth=sel?2:1; ctx.strokeStyle=sel?ink:(dark()?'rgba(0,0,0,.45)':'rgba(255,255,255,.85)');
       ctx.stroke();
     });
-  }
-
-  // hover marker: ring + label chip, so a sliver is findable without zooming
-  if(hover){
-    const hf=feats.find(x=>x.kind===hover.kind&&x.name===hover.name);
-    if(hf){
-      const [ha,hb,hc,hd]=bbox(hf.geom);
-      const mx=px((ha+hc)/2), my=py((hb+hd)/2);
-      const rad=Math.max((hc-ha)*fitS*scale,(MLAT(hd)-MLAT(hb))*fitS*scale)/2;
-      const R=Math.min(Math.max(rad+10,16),46), hu=hueOf(hf.kind,hf.name);
-      ctx.save();
-      ctx.strokeStyle=solid(hu);
-      ctx.globalAlpha=.30; ctx.lineWidth=7;
-      ctx.beginPath(); ctx.arc(mx,my,R,0,7); ctx.stroke();
-      ctx.globalAlpha=1; ctx.lineWidth=2;
-      ctx.beginPath(); ctx.arc(mx,my,R,0,7); ctx.stroke();
-      ctx.restore();
-      const nm=hf.kind==='ro'?roLabel(hf.name):hf.kind==='piu'?piuLabel(hf.name):hf.name;
-      ctx.font='700 11.5px "Public Sans",system-ui,sans-serif';
-      const tw=ctx.measureText(nm).width, bw2=tw+12, bh2=18, rr=4;
-      let bx=mx+R+8; if(bx+bw2>w-6) bx=mx-R-8-bw2;
-      const by=Math.max(4,Math.min(my-bh2/2,h-bh2-4));
-      ctx.fillStyle=dark()?'rgba(27,31,38,.96)':'rgba(255,255,255,.97)';
-      ctx.strokeStyle=solid(hu); ctx.lineWidth=1;
-      ctx.beginPath();
-      ctx.moveTo(bx+rr,by); ctx.lineTo(bx+bw2-rr,by);
-      ctx.quadraticCurveTo(bx+bw2,by,bx+bw2,by+rr); ctx.lineTo(bx+bw2,by+bh2-rr);
-      ctx.quadraticCurveTo(bx+bw2,by+bh2,bx+bw2-rr,by+bh2); ctx.lineTo(bx+rr,by+bh2);
-      ctx.quadraticCurveTo(bx,by+bh2,bx,by+bh2-rr); ctx.lineTo(bx,by+rr);
-      ctx.quadraticCurveTo(bx,by,bx+rr,by); ctx.closePath();
-      ctx.fill(); ctx.stroke();
-      ctx.textAlign='left'; ctx.textBaseline='middle';
-      ctx.fillStyle=ink; ctx.fillText(nm,bx+6,by+bh2/2);
-      ctx.textAlign='center';
-    }
   }
 
   // labels
@@ -456,6 +448,12 @@ function go(v){
     if(p&&p.lat!=null){ const w=W/DPR,h=H/DPR,ns=Math.min(Math.max(scale,7),9);
       const cx=fitX+(p.lon-LON0)*fitS*ns, cy=fitY+(my1-MLAT(p.lat))*fitS*ns;
       anim(ns,w/2-cx,h/2-cy,520);} else if(f.length) flyTo(unionBox(f)); }
+  else if(view.level==='state'&&STATES[view.state]&&STATES[view.state].geom
+          &&!(ST_HOME_ROS[view.state]||[]).length){
+    // administered state: frame the state, capped so a tiny one (Goa, Sikkim,
+    // the UTs) keeps its surroundings rather than filling the screen
+    flyTo(STATES[view.state].geom,520,6);
+  }
   else if(f.length) flyTo(unionBox(f));
   else draw();
 }
@@ -502,17 +500,35 @@ function render(){
   }
 
   else if(view.level==='state'){
-    const s=STATES[view.state]; let ros=ST_ROS[view.state].map(n=>ROS[n]);
-    if(!ros.length&&s.admin_ro&&ROS[s.admin_ro]) ros=[ROS[s.admin_ro]];
+    const s=STATES[view.state];
+    const homeNames=ST_HOME_ROS[view.state]||[];
+    const administered=!homeNames.length;         // no RO headquartered here
+    let ros=homeNames.map(n=>ROS[n]).filter(Boolean);
+    let visitors=(ST_VISIT_ROS[view.state]||[]).map(n=>ROS[n]).filter(Boolean);
+    if(administered){ ros=visitors; visitors=[]; }
     RH.innerHTML=`<div class="eyebrow"><span class="dot" style="background:${solid(ST_H[s.name])}"></span>State</div>
-      <h2>${esc(s.name)}</h2><div class="meta">${ros.length} regional office${ros.length>1?'s':''} operating here</div>`;
-    ST.innerHTML=statTiles([{v:num(s.n),l:'Projects'},{v:km(s.km).replace(' km',''),l:'Kilometres'},{v:cr(s.cost),l:'Awarded'}]);
+      <h2>${esc(s.name)}</h2><div class="meta">${
+        administered ? 'Administered from '+ros.map(r=>roLabel(r.name)).join(', ')
+                     : ros.length+' regional office'+(ros.length>1?'s':'')+' based here'}</div>`;
+    // figures are the union of these ROs' full portfolios, not state_name matches
+    const pool=visibleProjects();
+    const poolKm=pool.reduce((a,p)=>a+(+p.length_km||0),0);
+    const poolCr=pool.reduce((a,p)=>a+(+p.awarded_cost_cr||0),0);
+    ST.innerHTML=statTiles([{v:num(pool.length),l:'Projects'},
+      {v:poolKm.toLocaleString('en-IN',{maximumFractionDigits:0}),l:'Kilometres'},
+      {v:cr(poolCr),l:'Awarded'}]);
     RB.innerHTML=`<div class="sec"><h3>Regional Offices <span class="n">${ros.length}</span></h3><div class="rows">`+
-      ros.map(r=>{const n=(P_BY_STATE[view.state]||[]).filter(p=>p.region_name===r.name).length;
-        return rowHTML('ro',r.name,roLabel(r.name),n+' proj');}).join('')+`</div></div>`;
+      ros.map(r=>rowHTML('ro',r.name,roLabel(r.name),
+        (administered?(P_BY_STATE[view.state]||[]).filter(p=>p.region_name===r.name).length+' proj here'
+                    :(P_BY_RO[r.name]||[]).length+' proj'))).join('')+`</div></div>`+
+      (visitors.length?`<div class="sec"><h3>Also operating here <span class="n">${visitors.length}</span></h3><div class="rows">`+
+        visitors.map(r=>{const n=(P_BY_STATE[view.state]||[]).filter(p=>p.region_name===r.name).length;
+          return rowHTML('ro',r.name,roLabel(r.name),n+' proj here');}).join('')+
+        `</div><div style="font-size:11px;color:var(--ink-3);margin-top:7px;line-height:1.45">`+
+        `Based in another state; their totals count there.</div></div>`:'');
     bindRows(RB,n=>go({level:'ro',state:view.state,ro:n}));
     legend('Regional Offices',ros.map(r=>({n:roLabel(r.name),h:RO_H[r.name],
-      c:(P_BY_STATE[view.state]||[]).filter(p=>p.region_name===r.name).length,
+      c:(P_BY_RO[r.name]||[]).length,
       v:{level:'ro',state:view.state,ro:r.name}})));
     hint.innerHTML='Click a <b>regional office</b> to see its PIUs';
   }
@@ -523,12 +539,8 @@ function render(){
       <div class="eyebrow"><span class="dot" style="background:${solid(RO_H[r.name])}"></span>Regional Office</div>
       <h2>${esc(roLabel(r.name))}</h2>
       <div class="meta">${esc(r.zone_name||'')}${r.email?' · '+esc(r.email):''}</div>`;
-    const scoped=visibleProjects();
-    const scopedKm=scoped.reduce((a,p)=>a+(+p.length_km||0),0);
-    const partial=view.state&&scoped.length!==r.n;
-    ST.innerHTML=statTiles([
-      {v:num(partial?scoped.length:r.n),l:partial?'In '+view.state.split(' ')[0]:'Projects'},
-      {v:(partial?scopedKm:r.km).toLocaleString('en-IN',{maximumFractionDigits:0}),l:'Kilometres'},
+    ST.innerHTML=statTiles([{v:num(r.n),l:'Projects'},
+      {v:r.km.toLocaleString('en-IN',{maximumFractionDigits:0}),l:'Kilometres'},
       {v:pius.length,l:'PIUs'}]);
     let h=`<div class="sec"><h3>PIUs <span class="n">${pius.length}</span></h3><div class="rows">`+
       pius.map(p=>rowHTML('piu',p.name,piuLabel(p.name),(P_BY_PIU[p.name]||[]).length+' proj')).join('')+`</div></div>`;
@@ -613,11 +625,10 @@ function bindRows(root,fn){ root.querySelectorAll('.row[data-n]').forEach(el=>{
   el.onmouseleave=()=>previewOff();
 });}
 
-/* Hovering a list row must make its territory findable. Zooming to fit is the
-   obvious move and the wrong one: RO-Gandhinagar's Rajasthan slice is 0.04% of
-   the state, so fitting it fills the screen with flat colour and loses all
-   context. Instead we mark it -- a pulsing ring plus a leader label -- and pan
-   only when the target sits outside the current viewport. */
+/* Hovering a list row highlights its territory, and pans (never zooms) only
+   when the target sits outside the current viewport. Zoom-to-fit was tried and
+   rejected: RO-Gandhinagar's Rajasthan slice is 0.04% of the state, so fitting
+   it filled the screen with flat colour and lost all context. */
 function previewOn(f){
   hover=f;
   if(previewTimer) clearTimeout(previewTimer);
