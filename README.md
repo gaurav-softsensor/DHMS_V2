@@ -183,20 +183,30 @@ in UP but serves Delhi and Haryana; Hyderabad serves Andhra Pradesh).
 ### Projects belong to an RO, never to a state
 
 A state is a **navigational grouping only** — it exists because we have a
-state->RO mapping. Every figure on the page aggregates by RO/PIU:
+state->RO mapping. Every figure on the page aggregates by RO/PIU.
 
-- **State view** totals the portfolios of the ROs *based in* that state
-  (`home_state`). Rajasthan reads 86 — RO-Jaipur's whole portfolio, including
-  its work over the border — not the 89 projects that happen to sit inside
-  Rajasthan.
-- An RO based elsewhere that runs a corridor across the border is a **visitor**:
-  listed under "Also operating here" with its local count, but its portfolio
-  counts toward its own state. RO-Delhi's 49 belong to Delhi, not Rajasthan.
+**The boundary is always the state.** A state view never draws an RO's national
+territory; it draws that RO's slice of this state (`ro_by_state`). Opening Goa
+shows Goa's outline labelled RO-Mumbai, not RO-Mumbai's Maharashtra footprint.
+
+**Which projects count depends on whether an RO is based here:**
+
+- **A state with its own RO stands for that office**, so the view shows its
+  full portfolio, spill included. Delhi reads 49 for RO-Delhi — its 11 Delhi
+  projects plus the 22 in Haryana, 14 in UP and 2 in Rajasthan — because those
+  are RO-Delhi's work. Rajasthan reads 86 for RO-Jaipur on the same basis.
+- **A state administered from elsewhere counts only its own work.** Showing the
+  visiting office's whole portfolio would flood the state with another state's
+  projects, so Goa is 1 project, not RO-Mumbai's 45.
+- A **visitor** — an office based elsewhere running a corridor across the
+  border — is listed under "Also working here" with its local count only; its
+  portfolio counts toward its own state.
 - **RO view** always shows that RO's complete portfolio, never scoped to the
   state you arrived through.
-- 14 states have no RO of their own (Goa, Ladakh, the NE states, the UTs). They
-  read "Administered from RO-X" and report only work actually located there —
-  Goa is 1 project, not RO-Mumbai's 45.
+- **A state with no projects at all** (Tripura, Sikkim, Mizoram, Nagaland,
+  Manipur, Arunachal Pradesh, Chandigarh) still opens as itself, showing its own
+  outline and naming the administering office. It used to jump straight to the
+  RO level, which blew the view open to that office's entire territory.
 
 ### Clipping: ROs that cross state lines
 
@@ -211,10 +221,15 @@ So `build.py` precomputes clipped slices:
 - `payload.ro_by_state[state][ro]` — the RO's polygon ∩ that state
 - `payload.piu_by_ro[ro][piu]`     — the PIU's polygon ∩ its RO
 
-`currentFeatures()` in `app.js` prefers the slice and falls back to the full
-polygon. The project dots and the RO stat tile are scoped to match, so an RO
-opened via a state reads "1 in Rajasthan", not its national 49, and the panel
-discloses the split under "Works across states".
+`currentFeatures()` in `app.js` uses the slice, falling back to the full polygon
+only when no slice exists. Hover tooltips follow the same rule as the panel: an
+office **based here** reports its whole portfolio and names the spill
+("also works in Haryana (22), Uttar Pradesh (14)"); a **visiting** office reports
+"Projects here / Length here / Awarded here" and names where it is based plus its
+national total, so a local shape never shows a national number without saying so.
+
+The camera caps zoom by state size (26x under 1.2 degrees, 14x under 3, else 6) —
+Delhi and Goa are specks at the wider cap.
 
 ### PIU name resolution
 
@@ -300,6 +315,23 @@ inside its own territory's width; a few long names have short forms
 with a collision check so two labels never overlap. This is why
 "Dadra and Nagar Haveli and Daman and Diu" no longer sprawls across Maharashtra —
 the hover tooltip still gives the full name.
+
+**Colours are adjacency-aware.** A name hash alone kept handing neighbours
+near-identical pastels (West Bengal and Odisha were the giveaway).
+`buildAdjacency()` derives which states actually touch from the drawn geometry,
+and `assignAdjacent()` then greedily colours them so **no two bordering states
+share a hue** -- verified in the build. It starts each search from the name's
+hash, so a state keeps its colour between builds.
+
+**No label is ever silently dropped.** An inline label that collides now retries
+as a callout, and a callout with no clean slot falls back to a position just
+outside the shape. Before this, West Bengal (narrow and curved, so no inside fit)
+and Tamil Nadu were simply skipped.
+
+**Borders carry the territory's own hue.** `edge(h)` returns a dark, saturated
+version of the fill hue (`62% 30%` light / `55% 62%` dark), so Rajasthan reads
+purple-edged and Gujarat red-edged instead of every state sharing one grey
+outline. The active territory gets a heavier line (1.6px vs 1.1px).
 
 **Context stays coloured.** Drilling into a state no longer blanks the rest of
 India: every other state keeps its own colour at 45% opacity, so the map still

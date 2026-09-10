@@ -1,3 +1,4 @@
+
 (function(){
 "use strict";
 const D = JSON.parse(document.getElementById('d').textContent);
@@ -7,12 +8,58 @@ const roLabel  = n => { n=String(n||''); return /^RO[-\s]/i.test(n) ? n.replace(
 const piuLabel = n => { n=String(n||''); return /^PIU[-\s]/i.test(n) ? n.replace(/^PIU\s+/i,'PIU-') : 'PIU-'+n; };
 
 /* ---------- palette: 25 hues, stable per name ---------- */
-const HUES=[188,12,262,42,150,330,72,208,352,108,28,238,168,318,55,282,132,2,222,95,308,178,38,252,120];
+/* ---------- palette ----------
+   A hash alone kept giving neighbours near-identical pastels (West Bengal and
+   Odisha were the giveaway). These 18 hues are spaced around the wheel, and
+   adjacency-aware assignment then guarantees that two territories sharing a
+   border never take the same one. */
+const HUES=[210,14,150,275,42,190,330,96,255,26,170,300,60,230,0,130,315,78];
 function idx(name,n){let h=0;for(let i=0;i<name.length;i++)h=(h*31+name.charCodeAt(i))>>>0;return h%n;}
+/* Greedy colouring: walk the list in a stable order and give each territory the
+   first hue none of its neighbours already uses. `adj` maps a name to the names
+   whose polygons touch it. */
+function assignAdjacent(names,adj){
+  const m={};
+  names.forEach(n=>{
+    const taken=new Set((adj[n]||[]).map(x=>m[x]).filter(v=>v!=null));
+    let pick=null;
+    for(let k=0;k<HUES.length;k++){                 // start from the hash so a
+      const h=HUES[(idx(n,HUES.length)+k)%HUES.length];   // name keeps its
+      if(!taken.has(h)){pick=h;break;}              // colour between builds
+    }
+    m[n]=pick!=null?pick:HUES[idx(n,HUES.length)];
+  });
+  return m;
+}
 const assign=(names)=>{const m={},used=new Set();names.forEach(n=>{let i=idx(n,HUES.length),g=0;
   while(used.has(i)&&g<HUES.length){i=(i+7)%HUES.length;g++;}used.add(i);m[n]=HUES[i];});return m;};
+
+/* Neighbour lists from the drawn geometry: two states are adjacent if their
+   bounding boxes overlap and their outlines come within ~0.35 degrees. */
+function buildAdjacency(items){
+  const bb=it=>{let a=1e9,b=1e9,c=-1e9,d=-1e9;
+    eachRing(it.geom,r=>r.forEach(p=>{if(p[0]<a)a=p[0];if(p[1]<b)b=p[1];if(p[0]>c)c=p[0];if(p[1]>d)d=p[1];}));
+    return [a,b,c,d];};
+  const pts=it=>{const o=[];eachRing(it.geom,r=>{for(let i=0;i<r.length;i+=3)o.push(r[i]);});return o;};
+  const meta=items.map(it=>({name:it.name,box:bb(it),pts:pts(it)}));
+  const adj={};
+  meta.forEach(m=>adj[m.name]=[]);
+  const PAD=0.35, P2=PAD*PAD;
+  for(let i=0;i<meta.length;i++) for(let j=i+1;j<meta.length;j++){
+    const A=meta[i],B=meta[j];
+    if(A.box[2]+PAD<B.box[0]||B.box[2]+PAD<A.box[0]
+       ||A.box[3]+PAD<B.box[1]||B.box[3]+PAD<A.box[1]) continue;
+    let touch=false;
+    for(const p of A.pts){ for(const q of B.pts){
+      const dx=p[0]-q[0], dy=p[1]-q[1];
+      if(dx*dx+dy*dy<P2){touch=true;break;} } if(touch)break; }
+    if(touch){adj[A.name].push(B.name);adj[B.name].push(A.name);}
+  }
+  return adj;
+}
+const ST_ADJ=buildAdjacency(D.states.filter(s=>s.geom));
+const ST_H=assignAdjacent(D.states.map(s=>s.name).sort(),ST_ADJ);
 const RO_H=assign(D.ros.map(r=>r.name).sort());
-const ST_H=assign(D.states.map(s=>s.name).sort());
 const PIU_H={}; D.ros.forEach(r=>{const b=RO_H[r.name]||200;
   r.pius.forEach((p,i)=>{PIU_H[p]=(b+((i%2?1:-1)*(9+Math.floor(i/2)*11))+360)%360;});});
 const dark=()=>{const t=document.documentElement.getAttribute('data-theme');
@@ -20,6 +67,8 @@ const dark=()=>{const t=document.documentElement.getAttribute('data-theme');
 const fill=h=>dark()?`hsl(${h} 42% 34%)`:`hsl(${h} 46% 76%)`;
 const fillHi=h=>dark()?`hsl(${h} 55% 45%)`:`hsl(${h} 58% 66%)`;
 const solid=h=>dark()?`hsl(${h} 60% 58%)`:`hsl(${h} 52% 44%)`;
+/* Border in the territory's own hue, dark enough to separate neighbours. */
+const edge=h=>dark()?`hsl(${h} 55% 62%)`:`hsl(${h} 62% 30%)`;
 const hueOf=(kind,name)=>kind==='state'?ST_H[name]:kind==='ro'?RO_H[name]:PIU_H[name]!=null?PIU_H[name]:200;
 
 /* ---------- indexes ---------- */
@@ -95,8 +144,15 @@ function refit(ms=520){
       const cx=fitX+(p.lon-LON0)*fitS*ns, cy=fitY+(my1-MLAT(p.lat))*fitS*ns;
       anim(ns,w/2-cx,h/2-cy,ms); return; }
   }
-  if(view.level==='state'&&STATES[view.state]&&STATES[view.state].geom
-     &&!(ST_HOME_ROS[view.state]||[]).length){ flyTo(STATES[view.state].geom,ms,6); return; }
+  // The state view is scoped to the state, so frame the state outline itself —
+  // framing the RO slices would drift when one barely clips the border.
+  // Small states (Delhi, Goa, Puducherry) need a much higher ceiling than big
+  // ones or they sit as a speck in the middle of their neighbours.
+  if(view.level==='state'&&STATES[view.state]&&STATES[view.state].geom){
+    const [a,b,c,d2]=bbox(STATES[view.state].geom);
+    const span=Math.max(c-a,d2-b);
+    const cap=span<1.2?26:span<3?14:6;
+    flyTo(STATES[view.state].geom,ms,cap); return; }
   if(f.length) flyTo(unionBox(f),ms); else draw();
 }
 
@@ -141,13 +197,23 @@ let labelHits=[];                          // on-screen label boxes, for clicks
 function currentFeatures(){
   if(view.level==='india') return D.states.filter(s=>s.geom).map(s=>({kind:'state',name:s.name,geom:s.geom,d:s}));
   if(view.level==='state'){
-    // full RO territories, not slices: the panel now reports each RO's whole
-    // portfolio, so the map must show the whole area that portfolio covers
-    let list=(ST_HOME_ROS[view.state]||[]);
-    if(!list.length) list=(ST_VISIT_ROS[view.state]||[]);
-    if(!list.length){const a=STATES[view.state]; if(a&&a.admin_ro) list=[a.admin_ro];}
-    return list.map(n=>ROS[n]).filter(r=>r&&r.geom)
-      .map(r=>({kind:'ro',name:r.name,geom:r.geom,d:r}));
+    // Stay inside the state the user picked. Each RO is drawn as its slice of
+    // THIS state only (D.ro_by_state), so opening Goa shows Goa's outline
+    // labelled RO-Mumbai rather than the whole Mumbai territory, and Delhi
+    // shows Delhi rather than RO-Delhi's reach across Haryana and UP.
+    const slices=(D.ro_by_state&&D.ro_by_state[view.state])||{};
+    let names=Object.keys(slices);
+    if(!names.length){
+      let list=(ST_HOME_ROS[view.state]||[]);
+      if(!list.length) list=(ST_VISIT_ROS[view.state]||[]);
+      if(!list.length){const a=STATES[view.state]; if(a&&a.admin_ro) list=[a.admin_ro];}
+      return list.map(n=>ROS[n]).filter(r=>r&&r.geom)
+        .map(r=>({kind:'ro',name:r.name,geom:r.geom,d:r}));
+    }
+    // biggest slice first so small ones stay clickable on top
+    names.sort((a,b)=>((P_BY_STATE[view.state]||[]).filter(p=>p.region_name===b).length)
+                     -((P_BY_STATE[view.state]||[]).filter(p=>p.region_name===a).length));
+    return names.filter(n=>ROS[n]).map(n=>({kind:'ro',name:n,geom:slices[n],d:ROS[n]}));
   }
   if(view.level==='ro'){
     return RO_PIUS[view.ro].map(n=>PIUS[n]).filter(p=>p&&p.geom)
@@ -162,15 +228,26 @@ function currentFeatures(){
 function visibleProjects(){
   if(view.level==='india') return [];
   if(view.level==='state'){
-    // A state is a navigational grouping only. Its figures are the union of the
-    // ROs that operate there -- including their work in neighbouring states --
-    // because project data belongs to an RO/PIU, never to a state.
+    // Which projects belong to a state depends on whether an RO is based here.
+    //
+    //   Delhi  -- RO-Delhi is headquartered here, so the state stands for that
+    //             office: show all 49 of its projects, including the ones that
+    //             run into Haryana, UP and Rajasthan.
+    //   Goa    -- no RO is based here; RO-Mumbai administers it from
+    //             Maharashtra. Showing RO-Mumbai's whole portfolio would flood
+    //             Goa with Maharashtra work, so show only Goa's own project.
+    //
+    // The boundary stays the state either way; only the project set differs.
     const home=ST_HOME_ROS[view.state]||[];
-    if(!home.length) return P_BY_STATE[view.state]||[];   // administered state
+    if(!home.length) return P_BY_STATE[view.state]||[];
     const seen=new Set(), out=[];
     home.forEach(rn=>(P_BY_RO[rn]||[]).forEach(p=>{
       if(!seen.has(p.upc)){seen.add(p.upc);out.push(p);}
     }));
+    // plus any visiting office's work that physically sits in this state
+    (P_BY_STATE[view.state]||[]).forEach(p=>{
+      if(!seen.has(p.upc)){seen.add(p.upc);out.push(p);}
+    });
     return out;
   }
   if(view.level==='ro') return P_BY_RO[view.ro]||[];
@@ -225,16 +302,20 @@ function draw(){
   if(view.level!=='india'){
     // Each surrounding state keeps its own hue and gets a visible border, so
     // neighbours read as separate territories instead of one wash.
-    const ctxBorder=dark()?'rgba(236,238,241,.34)':'rgba(27,31,38,.30)';
     D.states.forEach(st=>{
       if(!st.geom) return;
-      const hu=ST_H[st.name];
+      const hu=ST_H[st.name], act=st.name===view.state;
+      // At state level the RO slices ARE this state, drawn on top; painting the
+      // state underneath leaves its edge peeking out where a slice falls a
+      // fraction short of the border.
+      if(act&&view.level==='state') return;
       path(st.geom);
       ctx.globalAlpha=.5;
       ctx.fillStyle=fill(hu); ctx.fill('evenodd');
+      ctx.globalAlpha=act?1:.85;
+      ctx.strokeStyle=edge(hu);
+      ctx.lineWidth=act?1.6:1.1; ctx.stroke();
       ctx.globalAlpha=1;
-      ctx.strokeStyle=st.name===view.state?line:ctxBorder;
-      ctx.lineWidth=st.name===view.state?1.1:.9; ctx.stroke();
     });
     // Below an RO, the rest of its own state would otherwise sit white where the
     // sibling RO's territory is; paint the parent's ROs so the gap reads as map.
@@ -257,7 +338,7 @@ function draw(){
     path(f.geom);
     ctx.globalAlpha=adm?.42:1;
     ctx.fillStyle=on?fillHi(hu):fill(hu); ctx.fill('evenodd'); ctx.globalAlpha=1;
-    ctx.strokeStyle=on?solid(hu):line; ctx.lineWidth=on?2:.7; ctx.stroke();
+    ctx.strokeStyle=on?solid(hu):edge(hu); ctx.lineWidth=on?2.2:1.2; ctx.stroke();
   });
   ctx.restore();
 
@@ -344,7 +425,7 @@ function draw(){
     ctx.textAlign='center';
     inline.forEach(o=>{
       const box={x1:o.x-o.tw/2-2,y1:o.y-7,x2:o.x+o.tw/2+2,y2:o.y+7};
-      if(clash(box)) return;
+      if(clash(box)){ callout.push({...o,r:o.r!=null?o.r:8}); return; }  // retry outside
       placed.push(box); paint(o.t,o.x,o.y);
       noteHit(o.f,box.x1,box.y1,box.x2,box.y2);
     });
@@ -395,7 +476,15 @@ function draw(){
         }
         if(best) break;
       }
-      if(!best) return;
+      if(!best){
+        // No clean slot. Rather than leave the territory unnamed, take the
+        // first on-canvas position to its right and accept the overlap.
+        const rr=Number.isFinite(o.r)?o.r:8;
+        const lx=o.x+rr+14, ly=o.y;
+        if(lx+o.tw+8>w-3||ly<9||ly>h-9) return;
+        best={lx,ly,tx0:lx+5,right:true,
+              box:{x1:lx+3,y1:ly-7,x2:lx+5+o.tw+2,y2:ly+7}};
+      }
       placed.push(best.box);
       // The leader starts at the territory's centre, so the line always points
       // at the shape it names rather than grazing its edge.
@@ -461,8 +550,33 @@ function tipFor(f){
       foot='Administered by '+roLabel(d.admin_ro)+' — no projects on record'; }
     else { const n=ST_ROS[f.name].length;
       rows+=`<dt>Offices</dt><dd>${n}</dd>`; foot=ST_ROS[f.name].map(roLabel).join(' · '); } }
-  if(f.kind==='ro'){ rows+=`<dt>PIUs</dt><dd>${RO_PIUS[f.name].length}</dd>`;
-    foot=(d.zone_name||'')+(d.states.length>1?' · works in '+d.states.length+' states':''); }
+  if(f.kind==='ro'){
+    if(view.level==='state'&&view.state){
+      const based=(ST_HOME_ROS[view.state]||[]).indexOf(f.name)>=0;
+      if(based){
+        // The office is headquartered here, so the state stands for it: report
+        // its whole portfolio, and name the spill if there is one.
+        rows=`<dt>Projects</dt><dd>${num(d.n)}</dd><dt>Length</dt><dd>${km(d.km)}</dd>`+
+             `<dt>Awarded</dt><dd>${cr(d.cost)}</dd><dt>PIUs</dt><dd>${RO_PIUS[f.name].length}</dd>`;
+        const out=d.states.filter(x=>x.s!==view.state);
+        foot=out.length
+          ? 'Based here · also works in '+out.map(x=>x.s+' ('+x.n+')').join(', ')
+          : (d.zone_name||'')+' · based here';
+      } else {
+        // Visiting office: only its work inside this state belongs to the view.
+        const here=(P_BY_STATE[view.state]||[]).filter(p=>p.region_name===f.name);
+        const hkm=here.reduce((a,p)=>a+(+p.length_km||0),0);
+        const hcr=here.reduce((a,p)=>a+(+p.awarded_cost_cr||0),0);
+        rows=`<dt>Projects here</dt><dd>${num(here.length)}</dd>`+
+             `<dt>Length here</dt><dd>${km(hkm)}</dd>`+
+             `<dt>Awarded here</dt><dd>${cr(hcr)}</dd>`;
+        foot=roLabel(f.name)+' is based in '+(d.home_state||'another state')+
+             ' · '+num(d.n)+' projects in total';
+      }
+    } else {
+      rows+=`<dt>PIUs</dt><dd>${RO_PIUS[f.name].length}</dd>`;
+      foot=(d.zone_name||'')+(d.states.length>1?' · works in '+d.states.length+' states':'');
+    } }
   if(f.kind==='piu'){ rows+=`<dt>District</dt><dd>${d.district||'—'}</dd>`;
     foot=(d.ro?roLabel(d.ro):'')+(d.email?' · '+d.email:''); }
   return `<div class="t-h"><span class="dot" style="background:${solid(hu)}"></span>
@@ -511,8 +625,10 @@ cv.addEventListener('pointerup',e=>{
   // too small to click, and it works for the leader-line callouts too
   const f=pickLabel(cx,cy)||pick(cx,cy); if(!f)return;
   if(f.kind==='state'){
-    if(f.d&&f.d.admin_only&&f.d.admin_ro) go({level:'ro',state:f.name,ro:f.d.admin_ro});
-    else go({level:'state',state:f.name});
+    // A state with no projects still opens as ITSELF. Jumping straight to the
+    // administering RO used to blow the view open to that office's whole
+    // territory -- clicking Tripura showed all of RO-Guwahati's North-East.
+    go({level:'state',state:f.name});
   }
   else if(f.kind==='ro') go({level:'ro',state:view.state,ro:f.name});
   else if(f.kind==='piu'&&view.level==='ro') go({level:'piu',state:view.state,ro:view.ro,piu:f.name});
@@ -576,11 +692,10 @@ function render(){
       D.states.slice().sort((a,b)=>b.n-a.n).map(s=>rowHTML('state',s.name,s.name,
         s.admin_only?roLabel(s.admin_ro):s.n+' proj')).join('')+`</div></div>`;
     bindRows(RB,n=>{const st=STATES[n];
-      if(st&&st.admin_only&&st.admin_ro) go({level:'ro',state:n,ro:st.admin_ro});
-      else go({level:'state',state:n});});
+      go({level:'state',state:n});});
     legend('States',D.states.slice().sort((a,b)=>b.n-a.n).map(s=>({n:s.name,
       h:s.admin_only?hueOf('ro',s.admin_ro):ST_H[s.name],c:s.admin_only?'—':s.n,
-      v:s.admin_only?{level:'ro',state:s.name,ro:s.admin_ro}:{level:'state',state:s.name}})));
+      v:{level:'state',state:s.name}})));
     hint.innerHTML='Click a <b>state</b> to see its regional offices';
   }
 
@@ -591,31 +706,54 @@ function render(){
     let ros=homeNames.map(n=>ROS[n]).filter(Boolean);
     let visitors=(ST_VISIT_ROS[view.state]||[]).map(n=>ROS[n]).filter(Boolean);
     if(administered){ ros=visitors; visitors=[]; }
+    // Figures follow the same rule as the map: an office based here brings its
+    // whole portfolio; an office visiting from elsewhere contributes only the
+    // work that physically sits in this state.
+    const pool=visibleProjects();
+    const inState=P_BY_STATE[view.state]||[];
+    const isHome=rn=>homeNames.indexOf(rn)>=0;
+    const countFor=rn=>isHome(rn)?(P_BY_RO[rn]||[]).length
+                                 :inState.filter(p=>p.region_name===rn).length;
+    const labelFor=rn=>isHome(rn)?countFor(rn)+' proj':countFor(rn)+' proj here';
+    const hereCount=rn=>inState.filter(p=>p.region_name===rn).length;
+    // every RO with work here, plus any based here even with none
+    const workNames=[...new Set(inState.map(p=>p.region_name).filter(Boolean))];
+    const allNames=[...new Set([...homeNames,...workNames,
+      ...((STATES[view.state]&&STATES[view.state].admin_ro)?[STATES[view.state].admin_ro]:[])])]
+      .filter(n=>ROS[n]).sort((a,b)=>countFor(b)-countFor(a));
+    const based=allNames.filter(n=>homeNames.indexOf(n)>=0);
+    const visiting=allNames.filter(n=>homeNames.indexOf(n)<0);
     RH.innerHTML=`<div class="eyebrow"><span class="dot" style="background:${solid(ST_H[s.name])}"></span>State</div>
       <h2>${esc(s.name)}</h2><div class="meta">${
-        administered ? 'Administered from '+ros.map(r=>roLabel(r.name)).join(', ')
-                     : ros.length+' regional office'+(ros.length>1?'s':'')+' based here'}</div>`;
-    // figures are the union of these ROs' full portfolios, not state_name matches
-    const pool=visibleProjects();
+        !pool.length ? 'No projects on record · administered by '+allNames.map(n=>roLabel(n)).join(', ')
+        : administered ? 'Administered from '+allNames.map(n=>roLabel(n)).join(', ')
+                     : allNames.length+' regional office'+(allNames.length>1?'s':'')+' working here'}</div>`;
     const poolKm=pool.reduce((a,p)=>a+(+p.length_km||0),0);
     const poolCr=pool.reduce((a,p)=>a+(+p.awarded_cost_cr||0),0);
     ST.innerHTML=statTiles([{v:num(pool.length),l:'Projects'},
       {v:poolKm.toLocaleString('en-IN',{maximumFractionDigits:0}),l:'Kilometres'},
       {v:cr(poolCr),l:'Awarded'}]);
-    RB.innerHTML=`<div class="sec"><h3>Regional Offices <span class="n">${ros.length}</span></h3><div class="rows">`+
-      ros.map(r=>rowHTML('ro',r.name,roLabel(r.name),
-        (administered?(P_BY_STATE[view.state]||[]).filter(p=>p.region_name===r.name).length+' proj here'
-                    :(P_BY_RO[r.name]||[]).length+' proj'))).join('')+`</div></div>`+
-      (visitors.length?`<div class="sec"><h3>Also operating here <span class="n">${visitors.length}</span></h3><div class="rows">`+
-        visitors.map(r=>{const n=(P_BY_STATE[view.state]||[]).filter(p=>p.region_name===r.name).length;
-          return rowHTML('ro',r.name,roLabel(r.name),n+' proj here');}).join('')+
-        `</div><div style="font-size:11px;color:var(--ink-3);margin-top:7px;line-height:1.45">`+
-        `Based in another state; their totals count there.</div></div>`:'');
+    const roSec=(title,names,note)=>names.length?`<div class="sec"><h3>${title} <span class="n">${names.length}</span></h3><div class="rows">`+
+      names.map(n=>rowHTML('ro',n,roLabel(n),labelFor(n))).join('')+
+      `</div>`+(note?`<div style="font-size:11px;color:var(--ink-3);margin-top:7px;line-height:1.45">${note}</div>`:'')+
+      `</div>`:'';
+    const noWork=!pool.length;
+    RB.innerHTML = (noWork
+        ? `<div class="sec"><h3>Regional Offices <span class="n">${allNames.length}</span></h3><div class="rows">`+
+          allNames.map(n=>rowHTML('ro',n,roLabel(n),'administers')).join('')+
+          `</div><div style="font-size:11px;color:var(--ink-3);margin-top:7px;line-height:1.45">`+
+          `No NHAI projects recorded in ${esc(s.name)}. Open the office to see its work elsewhere.`+
+          `</div></div>`
+        : administered
+          ? roSec('Regional Offices',allNames,'Administered from another state — only work inside '+esc(s.name)+' is counted here.')
+          : roSec('Based here',based,'Full portfolio, including work that runs into neighbouring states.')+
+            roSec('Also working here',visiting,'Based elsewhere — only their projects inside '+esc(s.name)+' are counted.'));
     bindRows(RB,n=>go({level:'ro',state:view.state,ro:n}));
-    legend('Regional Offices',ros.map(r=>({n:roLabel(r.name),h:RO_H[r.name],
-      c:(P_BY_RO[r.name]||[]).length,
-      v:{level:'ro',state:view.state,ro:r.name}})));
-    hint.innerHTML='Click a <b>regional office</b> to see its PIUs';
+    legend('Regional Offices',allNames.map(n=>({n:roLabel(n),h:RO_H[n],
+      c:countFor(n),
+      v:{level:'ro',state:view.state,ro:n}})));
+    hint.innerHTML=pool.length?'Click a <b>regional office</b> to see its PIUs'
+      :'No projects here — click the <b>regional office</b> to see its network';
   }
 
   else if(view.level==='ro'){
