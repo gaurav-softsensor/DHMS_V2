@@ -51,7 +51,13 @@ _gap = outline.difference(_union_states)
 if not _gap.is_empty:
     _pieces = list(_gap.geoms) if _gap.geom_type=='MultiPolygon' else [_gap]
     for _pc in _pieces:
-        if _pc.area < 1e-4: continue
+        # Only the real claimed territory, which is ONE band of area ~11.5 across the
+        # north. The old 1e-4 floor also swept up 480 slivers totalling 1.45 -- the
+        # coastline disagreeing with Natural Earth all round India -- and handed each to
+        # whichever candidate state was nearest. Tamil Nadu collected 73 of them, from
+        # Gujarat's coast to the Andamans, so its polygon count went 2 -> 116 and
+        # RO-Madurai (which inherits the state outline) was drawn dotted along the sea.
+        if _pc.area < 1.0: continue
         _best=None;_bd=1e18
         for _sn in ('Jammu and Kashmir','Ladakh','Himachal Pradesh','Uttarakhand',
                     'Arunachal Pradesh','Sikkim','Manipur','Nagaland','Odisha','Gujarat','Tamil Nadu'):
@@ -392,6 +398,44 @@ for sn, rset in sorted(st_ros_map.items()):
             # sorted rset + name tiebreak keeps the winner stable across runs
             best=max(rset,key=lambda r: (ROGEO[r].intersection(pc.buffer(0.12)).area if r in ROGEO else 0, r))
             ROGEO[best]=unary_union([ROGEO[best],pc]) if best in ROGEO else pc
+# ---- an RO's own outline stops at its home state ----
+# The leftover-fill above gives a state's unclaimed remainder to the single RO that
+# works there, so Goa -- whose one project is RO-Mumbai's -- was absorbed into
+# RO-Mumbai's outline. Wherever that outline is drawn whole (the RO view, the
+# sibling-RO wash, and the state view for a visiting office) RO-Mumbai then spilled
+# out of Maharashtra and appeared to be an office in Goa.
+#
+# Only the drawn shape is clipped. The attribution is untouched: Goa's project stays
+# RO-Mumbai's, st_ros_map still pairs them, and ro_by_state keeps Goa's slice, so
+# opening Maharashtra still shows all of RO-Mumbai's work including the Goa one.
+for r in out['ros']:
+    rn, hs = r['name'], r.get('home_state')
+    rg, hg = ROGEO.get(rn), SGEO.get(r.get('home_state') or '')
+    if rg is None or not hs or hg is None: continue
+    # The home state PLUS the districts this RO actually staffs. RO-Delhi runs PIUs in
+    # Bhiwani, Rewari, Meerut, Baghpat and Mathura -- real offices on the ground in
+    # Haryana and UP -- so clipping it to Delhi alone left those PIUs drawn far outside
+    # their own RO's boundary, which read as RO-Delhi showing another RO's PIUs. An
+    # administered state (Goa, the NE) contributes no PIU district, so it is still cut.
+    keep = [hg.buffer(0)]
+    for _pn in r.get('pius') or []:
+        _pg = PIUGEO.get(_pn)
+        if _pg is not None and not _pg.is_empty: keep.append(_pg.buffer(0))
+    try:
+        clipped = rg.buffer(0).intersection(unary_union(keep))
+    except Exception:                       # GEOS topology conflicts
+        continue
+    # No size threshold. An earlier "keep at least half the RO" guard silently skipped
+    # the worst case: RO-Guwahati keeps only 31% of its area when clipped to Assam
+    # precisely BECAUSE the other 69% is the six NE states it merely administers. A
+    # home-state ratio is wrong too -- two ROs legitimately share one state, so
+    # RO-Mumbai fills 39% of Maharashtra and RO-Nagpur the rest, and neither is an error.
+    #
+    # The clip is only skipped when it would leave nothing, which is the one genuine
+    # failure (a home_state whose outline does not overlap the districts at all).
+    if not clipped.is_empty and clipped.area > 0:
+        ROGEO[rn] = clipped
+
 for r in out['ros']:
     if r['name'] in ROGEO: r['geom']=rnd(simp(ROGEO[r['name']],0.01))
 
@@ -430,7 +474,13 @@ for r in out['ros']:
             piece = pg.buffer(0).intersection(rgb)
         except Exception:
             piece = pg.buffer(1e-9).intersection(rgb.buffer(1e-9))
-        if piece.is_empty or piece.area < 1e-6: continue
+        # A PIU that falls outside its own RO is kept whole rather than dropped. NHAI
+        # really does post one there -- PIU Vasant Vihar is in Delhi but reports to
+        # RO-Dehradun in Uttarakhand -- and clipping it away left the RO view silently
+        # one office short instead of showing where that office actually is.
+        if piece.is_empty or piece.area < 1e-6:
+            sl[pn] = rnd(simp(pg.buffer(0), 0.006))
+            continue
         sl[pn] = rnd(simp(piece, 0.006))
     out['piu_by_ro'][r['name']] = sl
 

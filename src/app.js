@@ -149,10 +149,15 @@ function refit(ms=520){
   // Small states (Delhi, Goa, Puducherry) need a much higher ceiling than big
   // ones or they sit as a speck in the middle of their neighbours.
   if(view.level==='state'&&STATES[view.state]&&STATES[view.state].geom){
-    const [a,b,c,d2]=bbox(STATES[view.state].geom);
+    // ...unless an office drawn for this state sits outside it. Goa's only RO is
+    // RO-Mumbai, now highlighted over in Maharashtra; framing Goa alone would leave
+    // the one thing the view is about off-screen. Widen to take both in.
+    const away=f.filter(x=>x.away&&x.geom);
+    const g=away.length?unionBox([{geom:STATES[view.state].geom},...away]):STATES[view.state].geom;
+    const [a,b,c,d2]=bbox(g);
     const span=Math.max(c-a,d2-b);
     const cap=span<1.2?26:span<3?14:6;
-    flyTo(STATES[view.state].geom,ms,cap); return; }
+    flyTo(g,ms,cap); return; }
   if(f.length) flyTo(unionBox(f),ms); else draw();
 }
 
@@ -213,7 +218,19 @@ function currentFeatures(){
     // biggest slice first so small ones stay clickable on top
     names.sort((a,b)=>((P_BY_STATE[view.state]||[]).filter(p=>p.region_name===b).length)
                      -((P_BY_STATE[view.state]||[]).filter(p=>p.region_name===a).length));
-    return names.filter(n=>ROS[n]).map(n=>({kind:'ro',name:n,geom:slices[n],d:ROS[n]}));
+    // An office is shown where it SITS, not where its work happens.
+    //
+    // The slice above is the RO's footprint clipped to the state being viewed, which is
+    // right for an RO based here: RO-Mumbai in Maharashtra should read as its Maharashtra
+    // half, not as its whole reach. It is wrong for a visiting office. Goa has no RO of
+    // its own -- RO-Mumbai administers its one project from Maharashtra -- and slicing
+    // painted Goa's own outline and labelled it "RO-Mumbai", so the map claimed an office
+    // in Goa that does not exist there. Opening Goa now leaves RO-Mumbai highlighted in
+    // Maharashtra where it actually is, and Goa's project still plots in Goa.
+    return names.filter(n=>ROS[n]).map(n=>{
+      const away=(ROS[n].home_state&&ROS[n].home_state!==view.state);
+      return {kind:'ro',name:n,geom:(away&&ROS[n].geom)?ROS[n].geom:slices[n],d:ROS[n],away};
+    });
   }
   if(view.level==='ro'){
     return RO_PIUS[view.ro].map(n=>PIUS[n]).filter(p=>p&&p.geom)
@@ -308,7 +325,15 @@ function draw(){
       // At state level the RO slices ARE this state, drawn on top; painting the
       // state underneath leaves its edge peeking out where a slice falls a
       // fraction short of the border.
-      if(act&&view.level==='state') return;
+      //
+      // ...but only when something is actually drawn over it. For a state whose
+      // office sits elsewhere (Mizoram -> RO-Guwahati in Assam) the features are
+      // over THERE, so skipping the wash left the state the user just clicked
+      // unpainted while a fill appeared in another state entirely -- the map read
+      // as if RO-Guwahati were drawn on Mizoram. Paint it here, and mark it active
+      // so it still reads as the subject.
+      const coveredHere=feats.some(f=>!f.away);
+      if(act&&view.level==='state'&&coveredHere) return;
       path(st.geom);
       ctx.globalAlpha=.5;
       ctx.fillStyle=fill(hu); ctx.fill('evenodd');
