@@ -651,6 +651,24 @@ function draw(){
     const TRIM={'Dadra and Nagar Haveli and Daman and Diu':'Daman & Diu',
       'Andaman and Nicobar':'Andaman & Nicobar'};
 
+    /*
+     * Coastal states are named out at sea, with the leader pointing back to
+     * the shape -- an inline name on a narrow coastal strip reads as if it
+     * belongs to the larger neighbour behind it ("Goa" sat against Karnataka,
+     * "Andhra Pradesh" over its own border).
+     *
+     * This is an explicit list rather than a geometric test: `D.outline` is
+     * India only, so probing outward cannot tell the Arabian Sea from
+     * Pakistan, and every land-border state (Tripura, Sikkim, J&K) came back
+     * looking coastal. The coastline does not change, so a list is both
+     * accurate and cheap.
+     *
+     * Landlocked states keep their inline labels -- they have no sea to be
+     * moved to, and a leader into the interior would cross other states.
+     */
+    const COASTAL=new Set(['Andhra Pradesh','Goa','Gujarat','Karnataka','Kerala',
+      'Maharashtra','Odisha','Tamil Nadu','West Bengal']);
+
     // Pass 1: decide inline vs. callout, measuring the FULL name in both cases.
     const inline=[], callout=[];
     feats.forEach(f=>{
@@ -660,7 +678,7 @@ function draw(){
       const [a,b,cc,dd]=bbox(f.geom);
       const bw=(cc-a)*fitS*scale, bh=(MLAT(dd)-MLAT(b))*fitS*scale;
       let t=f.kind==='ro'?roLabel(f.name):f.kind==='piu'?piuLabel(f.name):f.name;
-      const forced=f.kind==='state'&&ALWAYS_CALLOUT.has(f.name);
+      const forced=f.kind==='state'&&(ALWAYS_CALLOUT.has(f.name)||COASTAL.has(f.name));
       if(forced && TRIM[f.name]) t=TRIM[f.name];
       const tw=ctx.measureText(t).width;
       if(!forced && tw<=bw-6 && bh>=13) inline.push({f,x,y,t,tw});
@@ -680,6 +698,43 @@ function draw(){
                    x2:r.right-stageBox.left+6,y2:r.bottom-stageBox.top+6});
     });
     const clash=q=>placed.some(p=>!(q.x2<p.x1||q.x1>p.x2||q.y2<p.y1||q.y1>p.y2));
+
+    /*
+     * Leader lines are obstacles too.
+     *
+     * `placed` only ever held label boxes, so a later callout could route its
+     * leader straight through an earlier label, and two leaders could cross --
+     * the "Tamil Nadu --- Puducherry" line ran through its neighbours. Each
+     * drawn leader is recorded here and tested against both the candidate box
+     * and the candidate leader.
+     */
+    const leaders=[];
+    // Segment/rectangle intersection: cheap reject on the segment's own bbox,
+    // then a standard slab clip against the rectangle.
+    const segBox=(x1,y1,x2,y2,b)=>{
+      if(Math.max(x1,x2)<b.x1||Math.min(x1,x2)>b.x2||
+         Math.max(y1,y2)<b.y1||Math.min(y1,y2)>b.y2) return false;
+      const dx=x2-x1, dy=y2-y1;
+      let t0=0,t1=1;
+      for(const [p,q] of [[-dx,x1-b.x1],[dx,b.x2-x1],[-dy,y1-b.y1],[dy,b.y2-y1]]){
+        if(p===0){ if(q<0) return false; continue; }
+        const r=q/p;
+        if(p<0){ if(r>t1) return false; if(r>t0) t0=r; }
+        else   { if(r<t0) return false; if(r<t1) t1=r; }
+      }
+      return true;
+    };
+    const segSeg=(a,b,c,d,e,f,g,hh)=>{
+      const d1=(g-e)*(b-f)-(hh-f)*(a-e), d2=(g-e)*(d-f)-(hh-f)*(c-e);
+      const d3=(c-a)*(f-b)-(d-b)*(e-a),  d4=(c-a)*(hh-b)-(d-b)*(g-a);
+      return ((d1>0)!==(d2>0))&&((d3>0)!==(d4>0));
+    };
+    // A candidate leader must not cross a placed label box or an existing leader.
+    const leaderClash=(x1,y1,x2,y2)=>
+      placed.some(p=>segBox(x1,y1,x2,y2,p))||
+      leaders.some(L=>segSeg(x1,y1,x2,y2,L.x1,L.y1,L.x2,L.y2));
+    // A candidate label box must not sit on top of an already-drawn leader.
+    const boxOnLeader=q=>leaders.some(L=>segBox(L.x1,L.y1,L.x2,L.y2,q));
     const paint=(t,x,y)=>{
       ctx.lineWidth=3.2; ctx.strokeStyle=dark()?'rgba(20,23,28,.85)':'rgba(255,255,255,.9)';
       ctx.strokeText(t,x,y); ctx.fillStyle=ink; ctx.fillText(t,x,y);
@@ -691,7 +746,7 @@ function draw(){
     ctx.textAlign='center';
     inline.forEach(o=>{
       const box={x1:o.x-o.tw/2-2,y1:o.y-7,x2:o.x+o.tw/2+2,y2:o.y+7};
-      if(clash(box)){ callout.push({...o,r:o.r!=null?o.r:8}); return; }  // retry outside
+      if(clash(box)||boxOnLeader(box)){ callout.push({...o,r:o.r!=null?o.r:8}); return; }  // retry outside
       placed.push(box); paint(o.t,o.x,o.y);
       noteHit(o.f,box.x1,box.y1,box.x2,box.y2);
     });
@@ -708,6 +763,28 @@ function draw(){
     const SEAWARD={'Lakshadweep':[-1,0],'Andaman and Nicobar':[1,0],
       'Puducherry':[1,0],'Dadra and Nagar Haveli and Daman and Diu':[-1,0]};
     const OVERLAND=new Set();
+
+    /*
+     * A called-out state is named OUTSIDE the landmass, with the leader
+     * pointing back in.
+     *
+     * Only the four SEAWARD territories were ever required to clear the coast.
+     * Every other callout took the first slot that missed other labels, which
+     * for a small state meant landing on a neighbour -- "Goa" sat inside
+     * Karnataka and "Andhra Pradesh" inside its own neighbour, so the name read
+     * as a label for the wrong territory. Requiring open water for all of them
+     * makes the leader do the work of pointing, which is what it is for.
+     *
+     * Land is sampled at the anchor and at both ends of the text, since a long
+     * name can clear the coast at its anchor and still overhang the shore.
+     */
+    const onLand=(lx,ly,x1,x2)=>{
+      for(const sx of [lx,x1,x2,(x1+x2)/2]){
+        const g=toGeo(sx,ly);
+        if(hit(D.outline,g[0],g[1])) return true;
+      }
+      return false;
+    };
     const lineCol=dark()?'rgba(236,238,241,.6)':'rgba(27,31,38,.5)';
     callout.forEach(o=>{
       let best=null;
@@ -719,7 +796,11 @@ function draw(){
       // leader never cuts across the mainland. The legend sits top-left to
       // leave this water free.
       const dirs=pref?[pref,[pref[0],-1],[pref[0],1]]:DIRS;
+      /* A state has to reach past the coastline, which can be far from its
+         centroid, so its ladder runs much further out than a UT's. */
+      const seaward=!pref&&o.f.kind==='state';
       const steps=pref?(OVERLAND.has(o.f.name)?[52,70,90,112,136]:[16,26,38,52])
+                : seaward?[18,30,44,60,78,98,120,145,175,210,250,295]
                       :[8,13,19,26,35,46];
       for(const step of steps){
         for(const [dx,dy] of dirs){
@@ -731,16 +812,47 @@ function draw(){
           if(x1<3||x2>w-3||ly<9||ly>h-9) continue;
           const padY=OVERLAND.has(o.f.name)?13:7;
           const box={x1:x1-2,y1:ly-padY,x2:x2+2,y2:ly+padY};
-          if(clash(box)) continue;
+          if(clash(box)||boxOnLeader(box)) continue;
           // an offshore/coastal territory must not have its label dumped back
           // on the mainland: require open water at the label anchor
           if(pref&&!OVERLAND.has(o.f.name)){
             const g=toGeo(lx,ly);
             if(hit(D.outline,g[0],g[1])) continue;
           }
+          // a called-out state is named outside India, never on a neighbour
+          if(seaward&&onLand(lx,ly,x1,x2)) continue;
+          // the leader must not cut through another label or another leader
+          if(leaderClash(o.x,o.y,lx,ly)) continue;
           best={lx,ly,tx0,right,box}; break;
         }
         if(best) break;
+      }
+      if(!best&&seaward){
+        /*
+         * Nothing offshore was free. Relax in the order that costs the reader
+         * least: first allow the leader to cross another leader (a crossing
+         * line is still readable), and only then allow the name back over
+         * land. Keeping the water requirement one step longer is what stops
+         * "Goa" landing inside Karnataka.
+         */
+        for(const allowLand of [false,true]){
+          for(const step of [18,30,44,60,78,98,120,145,175,210,250,295]){
+            for(const [dx,dy] of DIRS){
+              const lead=o.r+step;
+              const lx=o.x+dx*lead, ly=o.y+dy*lead;
+              const right=dx>=0;
+              const tx0=lx+(right?5:-5);
+              const x1=right?tx0:tx0-o.tw, x2=right?tx0+o.tw:tx0;
+              if(x1<3||x2>w-3||ly<9||ly>h-9) continue;
+              const box={x1:x1-2,y1:ly-7,x2:x2+2,y2:ly+7};
+              if(clash(box)||boxOnLeader(box)) continue;
+              if(!allowLand&&onLand(lx,ly,x1,x2)) continue;
+              best={lx,ly,tx0,right,box}; break;
+            }
+            if(best) break;
+          }
+          if(best) break;
+        }
       }
       if(!best){
         // No clean slot. Rather than leave the territory unnamed, take the
@@ -752,6 +864,7 @@ function draw(){
               box:{x1:lx+3,y1:ly-7,x2:lx+5+o.tw+2,y2:ly+7}};
       }
       placed.push(best.box);
+      leaders.push({x1:o.x,y1:o.y,x2:best.lx,y2:best.ly});
       // The leader starts at the territory's centre, so the line always points
       // at the shape it names rather than grazing its edge.
       ctx.beginPath(); ctx.moveTo(o.x,o.y); ctx.lineTo(best.lx,best.ly);
